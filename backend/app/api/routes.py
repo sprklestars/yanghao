@@ -116,6 +116,35 @@ async def get_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
     return conv
 
 
+@router.post("/conversations/{conv_id}/end")
+async def end_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
+    """End a conversation and mark the target user as blocked."""
+    from datetime import datetime
+    
+    result = await db.execute(
+        select(Conversation).where(Conversation.id == conv_id)
+    )
+    conv = result.scalar_one_or_none()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    # Mark conversation as ended
+    conv.ended_at = datetime.now(datetime.timezone.utc)
+    conv.state = "exit"  # Changed to exit state
+    
+    await db.commit()
+    
+    # Notify via WebSocket
+    await manager.send_to_task(str(conv.task_id), {
+        "type": "conversation_ended",
+        "conversation_id": conv_id,
+        "target_user_id": conv.target_user_id,
+        "reason": "blocked_by_operator",
+    })
+    
+    return {"status": "ended", "conversation_id": conv_id}
+
+
 # ── Intelligence ──────────────────────────────────────
 
 @router.get("/intelligence", response_model=IntelligenceListResponse)

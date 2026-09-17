@@ -7,11 +7,35 @@ export default function ConversationsPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<Conversation | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [blockedUsers, setBlockedUsers] = useState<Set<string>>(new Set());
 
   async function loadConversations() {
     const data = await fetchAPI('/conversations');
     setConversations(data);
     setLoaded(true);
+  }
+
+  async function blockUser(conversationId: string, targetUserId: string) {
+    try {
+      // Mark conversation as ended and add user to blocked list
+      await fetchAPI(`/conversations/${conversationId}/end`, { method: 'POST' });
+      setBlockedUsers(prev => new Set(prev).add(targetUserId));
+      
+      // Remove from conversations list
+      setConversations(prev => prev.filter(c => c.id !== conversationId));
+      if (selected?.id === conversationId) {
+        setSelected(null);
+      }
+      
+      alert(`已拉黑用户 ${targetUserId}，该用户的消息将不再接收。`);
+    } catch (error) {
+      console.error('Failed to block user:', error);
+      alert('拉黑失败，请重试');
+    }
+  }
+
+  function isBlocked(userId: string): boolean {
+    return blockedUsers.has(userId);
   }
 
   return (
@@ -30,7 +54,7 @@ export default function ConversationsPage() {
             <div
               key={c.id}
               onClick={() => setSelected(c)}
-              className={`p-3 border-b cursor-pointer hover:bg-gray-50 text-sm ${
+              className={`p-3 border-b cursor-pointer hover:bg-gray-50 text-sm relative ${
                 selected?.id === c.id ? 'bg-blue-50' : ''
               }`}
             >
@@ -38,6 +62,17 @@ export default function ConversationsPage() {
               <div className="text-gray-500 text-xs mt-0.5">
                 {c.state} &middot; {c.turn_count} turns
               </div>
+              {/* Block button */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  blockUser(c.id, c.target_user_id);
+                }}
+                className="absolute right-2 top-2 text-xs px-2 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded"
+                title="拉黑此用户"
+              >
+                🚫 拉黑
+              </button>
             </div>
           ))}
         </div>

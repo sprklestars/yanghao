@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import random
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
 
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
@@ -25,6 +28,15 @@ from app.services.platform.base import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class MediaGroupBuffer:
+    """Buffer for aggregating media group messages."""
+    items: list[dict] = field(default_factory=list)
+    last_update: datetime = field(default_factory=datetime.now)
+    target_id: str = ""
+    message_thread_id: int | None = None
+
+
 class TelegramAdapter(PlatformAdapter):
     def __init__(self, api_id: int, api_hash: str, session_name: str = "osint_tg"):
         self._api_id = api_id
@@ -34,6 +46,9 @@ class TelegramAdapter(PlatformAdapter):
         self._daily_actions = 0
         self._error_count = 0
         self._total_actions = 0
+        # Media group buffering: {media_group_id: MediaGroupBuffer}
+        self._media_groups: dict[str, MediaGroupBuffer] = {}
+        self._flush_task: asyncio.Task | None = None
 
     async def authenticate(self, credentials: AccountCredentials) -> bool:
         self._client = TelegramClient(
@@ -136,6 +151,16 @@ class TelegramAdapter(PlatformAdapter):
     async def send_message(self, target_id: str, content: MessageContent) -> bool:
         assert self._client is not None
         try:
+            # Check if this is part of a media group
+            media_group_id = content.metadata.get("media_group_id") if content.metadata else None
+            
+            if media_group_id:
+                return await self._handle_media_group(
+                    target_id=target_id,
+                    content=content,
+                    media_group_id=media_group_id,
+                )
+
             # simulate typing delay based on message length
             chars = len(content.text)
             typing_delay = chars * 0.05 * random.uniform(0.7, 1.3)
@@ -157,6 +182,115 @@ class TelegramAdapter(PlatformAdapter):
             logger.error("send_message error: %s", e)
             self._error_count += 1
             return False
+
+    async def _handle_media_group(
+        self,
+        target_id: str,
+        content: MessageContent,
+        media_group_id: str,
+    ) -> bool:
+        """Handle media group messages by buffering and batch sending."""
+        assert self._client is not None
+        
+        # Get or create buffer for this media group
+        if media_group_id not in self._media_groups:
+            self._media_groups[media_group_id] = MediaGroupBuffer(
+                target_id=target_id,
+                message_thread_id=content.metadata.get("message_thread_id"),
+            )
+        
+        buffer = self._media_groups[media_group_id]
+        buffer.items.append(content)
+        buffer.last_update = datetime.now()
+        
+        logger.info(
+            "Buffered media group %s: %d items",
+            media_group_id,
+            len(buffer.items),
+        )
+        
+        # Schedule flush if not already scheduled
+        if not self._flush_task or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_expired_media_groups())
+        
+        # If we have 10 items, flush immediately
+        if len(buffer.items) >= 10:
+            await self._flush_media_group(media_group_id)
+            return True
+        
+        return True  # Buffered, will be sent later
+
+    async def _flush_media_group(self, media_group_id: str) -> bool:
+        """Flush a buffered media group to Telegram."""
+        assert self._client is not None
+        
+        if media_group_id not in self._media_groups:
+            return False
+        
+        buffer = self._media_groups.pop(media_group_id)
+        
+        if not buffer.items:
+            return False
+        
+        try:
+            # If only one item, send normally
+            if len(buffer.items) == 1:
+                content = buffer.items[0]
+                await self._client.send_message(
+                    int(buffer.target_id),
+                    content.text,
+                )
+                logger.info("Sent single media item from group %s", media_group_id)
+            else:
+                # Send multiple items as a group
+                # Note: Telethon doesn't have direct send_media_group,
+                # so we send them sequentially with small delays
+                for i, content in enumerate(buffer.items):
+                    await self._client.send_message(
+                        int(buffer.target_id),
+                        content.text,
+                    )
+                    if i < len(buffer.items) - 1:
+                        await asyncio.sleep(0.5)  # Small delay between items
+                logger.info(
+                    "Sent media group %s with %d items",
+                    media_group_id,
+                    len(buffer.items),
+                )
+            
+            self._daily_actions += 1
+            self._total_actions += 1
+            return True
+            
+        except FloodWaitError as e:
+            logger.warning("FloodWait %ds on flush_media_group", e.seconds)
+            await asyncio.sleep(e.seconds)
+            return False
+        except Exception as e:
+            logger.error("flush_media_group error: %s", e)
+            self._error_count += 1
+            return False
+
+    async def _flush_expired_media_groups(self):
+        """Flush media groups that haven't received new items for 2 seconds."""
+        while True:
+            now = datetime.now()
+            expired_ids = []
+            
+            for media_group_id, buffer in self._media_groups.items():
+                elapsed = (now - buffer.last_update).total_seconds()
+                if elapsed > 2.0:  # 2 second timeout
+                    expired_ids.append(media_group_id)
+            
+            for media_group_id in expired_ids:
+                await self._flush_media_group(media_group_id)
+            
+            # Check every 500ms
+            await asyncio.sleep(0.5)
+            
+            # Exit if no more buffers
+            if not self._media_groups:
+                break
 
     async def listen_messages(self, callback) -> None:
         assert self._client is not None

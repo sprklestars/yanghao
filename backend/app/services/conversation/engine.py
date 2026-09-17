@@ -5,12 +5,14 @@ from enum import Enum
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.services.conversation.verification import verification_manager
 
 logger = logging.getLogger(__name__)
 
 
 class ConvState(str, Enum):
     IDLE = "idle"
+    VERIFICATION = "verification"  # New state for arithmetic verification
     GREETING = "greeting"
     PROBING = "probing"
     EXTRACTION = "extraction"
@@ -48,6 +50,7 @@ Safety rules:
 """
 
 STAGE_HINTS = {
+    ConvState.VERIFICATION: "The user needs to pass a simple arithmetic verification. Wait for their answer and check if it's correct.",
     ConvState.GREETING: "Start with a friendly greeting. Be casual and warm. Keep it short.",
     ConvState.PROBING: "Ask natural questions related to {category}. Show genuine curiosity. Don't be pushy.",
     ConvState.EXTRACTION: "The person seems interested. Ask for more details: contact info, pricing, website, specific services. Be polite.",
@@ -72,7 +75,24 @@ class ConversationEngine:
         state: ConvState,
         category: str,
         history: list[dict[str, str]],
+        target_user_id: str | None = None,  # New parameter for verification
     ) -> tuple[str, ConvState]:
+        # Handle verification first
+        if state == ConvState.IDLE and target_user_id:
+            if not verification_manager.is_verified(target_user_id):
+                # Check if this is a verification answer
+                challenge_msg = verification_manager.get_challenge_message(target_user_id)
+                if challenge_msg:
+                    return challenge_msg, ConvState.VERIFICATION
+
+                # User sent an answer, check it
+                if verification_manager.check_answer(target_user_id, incoming_message):
+                    reply = "✅ Xác minh thành công! Bây giờ chúng ta có thể bắt đầu trò chuyện."
+                    return reply, ConvState.GREETING
+                else:
+                    reply = "❌ Câu trả lời không đúng. Vui lòng thử lại hoặc liên hệ quản trị viên."
+                    return reply, ConvState.COOLDOWN
+
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             name=persona_config.get("name", "User"),
             age=persona_config.get("age", 28),
@@ -119,8 +139,12 @@ class ConversationEngine:
         if any(kw in lower for kw in alert_keywords):
             return ConvState.COOLDOWN
 
-        if current == ConvState.IDLE:
+        if current == ConvState.VERIFICATION:
+            # Verification is handled separately in generate_response
             return ConvState.GREETING
+
+        if current == ConvState.IDLE:
+            return ConvState.VERIFICATION  # Changed from GREETING to VERIFICATION
 
         if current == ConvState.GREETING and turn_count >= 2:
             return ConvState.PROBING
@@ -150,6 +174,7 @@ class ConversationEngine:
 
     def _fallback_reply(self, state: ConvState) -> str:
         fallbacks = {
+            ConvState.VERIFICATION: "Vui lòng trả lời câu hỏi xác minh.",
             ConvState.GREETING: "Chào bạn! 😊",
             ConvState.PROBING: "À hay quá, bạn kể thêm được không?",
             ConvState.EXTRACTION: "Cảm ơn bạn! Cho mình xin thêm thông tin nhé.",
