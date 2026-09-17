@@ -24,6 +24,7 @@ from app.services.platform.base import (
     PlatformName,
     UserProfile,
 )
+from app.services.security.account_warming import warming_manager
 
 logger = logging.getLogger(__name__)
 
@@ -107,11 +108,31 @@ class TelegramAdapter(PlatformAdapter):
 
     async def join_group(self, group_id: str) -> bool:
         assert self._client is not None
+        
+        # Check account warming limits
+        allowed, reason = warming_manager.check_and_enforce_limits(
+            account_id=self._session_name,
+            operation="join_group",
+        )
+        
+        if not allowed:
+            logger.warning("Account warming limit: %s", reason)
+            return False
+        
         try:
             entity = await self._client.get_entity(int(group_id))
             await self._client(JoinChannelRequest(entity))
+            
+            # Record the operation
+            warming_manager.record_operation(
+                account_id=self._session_name,
+                operation="join_group",
+            )
+            
             self._daily_actions += 1
             self._total_actions += 1
+            
+            # Add random delay after joining (30-120 seconds as per anti-detection)
             delay = random.uniform(30, 120)
             await asyncio.sleep(delay)
             return True
@@ -126,6 +147,17 @@ class TelegramAdapter(PlatformAdapter):
 
     async def send_friend_request(self, user_id: str) -> bool:
         assert self._client is not None
+        
+        # Check account warming limits
+        allowed, reason = warming_manager.check_and_enforce_limits(
+            account_id=self._session_name,
+            operation="friend_request",
+        )
+        
+        if not allowed:
+            logger.warning("Account warming limit: %s", reason)
+            return False
+        
         try:
             entity = await self._client.get_entity(int(user_id))
             await self._client(AddContactRequest(
@@ -134,8 +166,16 @@ class TelegramAdapter(PlatformAdapter):
                 last_name=getattr(entity, "last_name", "") or "",
                 phone=getattr(entity, "phone", "") or "",
             ))
+            
+            # Record the operation
+            warming_manager.record_operation(
+                account_id=self._session_name,
+                operation="friend_request",
+            )
+            
             self._daily_actions += 1
             self._total_actions += 1
+            
             delay = random.uniform(30, 120)
             await asyncio.sleep(delay)
             return True
@@ -150,23 +190,44 @@ class TelegramAdapter(PlatformAdapter):
 
     async def send_message(self, target_id: str, content: MessageContent) -> bool:
         assert self._client is not None
-        try:
-            # Check if this is part of a media group
-            media_group_id = content.metadata.get("media_group_id") if content.metadata else None
-            
-            if media_group_id:
-                return await self._handle_media_group(
-                    target_id=target_id,
-                    content=content,
-                    media_group_id=media_group_id,
-                )
+        
+        # Check if this is part of a media group
+        media_group_id = content.metadata.get("media_group_id") if content.metadata else None
+        
+        if media_group_id:
+            return await self._handle_media_group(
+                target_id=target_id,
+                content=content,
+                media_group_id=media_group_id,
+            )
 
+        # Check account warming limits
+        is_stranger = content.metadata.get("is_stranger", False) if content.metadata else False
+        allowed, reason = warming_manager.check_and_enforce_limits(
+            account_id=self._session_name,
+            operation="send_message",
+            is_stranger=is_stranger,
+        )
+        
+        if not allowed:
+            logger.warning("Account warming limit: %s", reason)
+            return False
+
+        try:
             # simulate typing delay based on message length
             chars = len(content.text)
             typing_delay = chars * 0.05 * random.uniform(0.7, 1.3)
             await asyncio.sleep(min(typing_delay, 10))
 
             await self._client.send_message(int(target_id), content.text)
+            
+            # Record the operation
+            warming_manager.record_operation(
+                account_id=self._session_name,
+                operation="send_message",
+                is_stranger=is_stranger,
+            )
+            
             self._daily_actions += 1
             self._total_actions += 1
 
