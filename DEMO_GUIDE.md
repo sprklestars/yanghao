@@ -21,7 +21,7 @@
 ### 方式1: 运行简化演示脚本(推荐)
 
 ```bash
-cd /Users/cangnan/Desktop/yanghao/yanghao/backend
+cd <project-root>/backend
 python3 demo_simple.py
 ```
 
@@ -40,7 +40,7 @@ python3 demo_simple.py
 #### 步骤1: 安装依赖
 
 ```bash
-cd /Users/cangnan/Desktop/yanghao/yanghao/backend
+cd <project-root>/backend
 
 # 创建虚拟环境
 python3 -m venv venv
@@ -55,8 +55,8 @@ playwright install chromium
 #### 步骤2: 配置环境变量
 
 已完成配置:
-- ✅ Telegram API: `35657908` / `bedae5e86415af82d0e2ff98be32bede`
-- ✅ DeepSeek API: `sk-bcca05e65fbb43498e9587ecb6b9d76e`
+- ✅ Telegram API: configured through `backend/.env`
+- ✅ DeepSeek API: configured through `backend/.env`
 - ✅ Session文件: `printer.session`, `user3.session`, `user4.session`
 
 #### 步骤3: 启动后端服务
@@ -73,7 +73,7 @@ celery -A app.workers.tasks worker --loglevel=info --concurrency=2
 
 ```bash
 # 终端3: 启动Next.js
-cd /Users/cangnan/Desktop/yanghao/yanghao/frontend
+cd <project-root>/frontend
 npm install
 npm run dev
 ```

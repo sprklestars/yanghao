@@ -81,5 +81,6 @@ test_session*
 # Temporary files
 *.tmp
 *.temp
+*.pid
 tmp/
 temp/

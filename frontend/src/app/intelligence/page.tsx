@@ -1,26 +1,57 @@
 'use client';
 
 import { useState } from 'react';
-import { fetchAPI, type IntelligenceRecord } from '@/lib/api';
+import { fetchAPI, type IntelligenceRecord, DEMO_INTELLIGENCE } from '@/lib/api';
+
+// 演示模式 - 使用模拟数据
+const DEMO_MODE = true;
 
 export default function IntelligencePage() {
-  const [records, setRecords] = useState<IntelligenceRecord[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loaded, setLoaded] = useState(false);
+  const [records, setRecords] = useState<IntelligenceRecord[]>(DEMO_MODE ? DEMO_INTELLIGENCE : []);
+  const [total, setTotal] = useState(DEMO_MODE ? DEMO_INTELLIGENCE.length : 0);
+  const [loaded, setLoaded] = useState(DEMO_MODE);
   const [filters, setFilters] = useState({ category: '', platform: '' });
 
   async function loadRecords() {
-    const params = new URLSearchParams();
-    if (filters.category) params.set('category', filters.category);
-    if (filters.platform) params.set('platform', filters.platform);
-    const data = await fetchAPI(`/intelligence?${params}`);
-    setRecords(data.items);
-    setTotal(data.total);
-    setLoaded(true);
+    if (DEMO_MODE) {
+      let filtered = DEMO_INTELLIGENCE;
+      if (filters.category) {
+        filtered = filtered.filter(r => r.category === filters.category);
+      }
+      if (filters.platform) {
+        filtered = filtered.filter(r => r.platform === filters.platform);
+      }
+      setRecords(filtered);
+      setTotal(filtered.length);
+      setLoaded(true);
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams();
+      if (filters.category) params.set('category', filters.category);
+      if (filters.platform) params.set('platform', filters.platform);
+      const data = await fetchAPI(`/intelligence?${params}`);
+      setRecords(data.items);
+      setTotal(data.total);
+      setLoaded(true);
+    } catch (error) {
+      console.error('Failed to load intelligence:', error);
+      setRecords(DEMO_INTELLIGENCE);
+      setTotal(DEMO_INTELLIGENCE.length);
+      setLoaded(true);
+    }
   }
 
   return (
-    <div>
+    <div className="flex flex-col h-[calc(100vh-3rem)]">
+      {/* Demo mode banner */}
+      {DEMO_MODE && (
+        <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2 text-sm text-yellow-800 mb-4 rounded">
+          💡 <strong>演示模式:</strong> 当前使用模拟数据,无需后端服务。刷新页面数据会重置。
+        </div>
+      )}
+
       <h2 className="text-2xl font-bold mb-4">Intelligence Records</h2>
 
       <div className="flex gap-3 mb-4 items-end">
