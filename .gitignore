@@ -44,6 +44,11 @@ sessions/
 .env.local
 .env.*.local
 
+# Local credentials / secrets docs (never commit)
+CREDENTIALS.local.md
+*.secret.md
+secrets/
+
 # Database
 *.db
 *.sqlite
