@@ -1,67 +1,94 @@
 #!/usr/bin/env python3
-"""
-Quick login script for printer Telegram account.
-Run this and follow the prompts.
-"""
+import argparse
 import asyncio
+from getpass import getpass
+from pathlib import Path
+import re
 import sys
+
 from telethon import TelegramClient
-from app.core.config import settings
 
-SESSION = 'sessions/printer'
+from app.core.config import Settings
 
-async def main():
-    print("\n" + "="*60)
-    print("🔐 Telegram Printer Account Login")
-    print("="*60)
-    print("\n📝 Instructions:")
-    print("1. Enter your phone number with country code (e.g., +84123456789)")
-    print("2. Check your Telegram app for verification code")
-    print("3. Enter the code you received")
-    print("4. If you have 2FA, enter your password\n")
+BACKEND_DIR = Path(__file__).resolve().parent
+SESSION_DIR = BACKEND_DIR / "sessions"
 
-    # Try with proxy first
+
+def session_name(value: str) -> str:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,47}", value):
+        raise argparse.ArgumentTypeError("会话名请使用1–48位小写字母、数字、下划线或短横线")
+    return value
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="逐个登录Telegram账号，每个名称保存独立会话")
+    parser.add_argument(
+        "sessions", nargs="*", type=session_name, default=["printer"],
+        help="例如 test1 test2 test3；不指定时使用 printer",
+    )
+    args = parser.parse_args(argv)
+    if len(set(args.sessions)) != len(args.sessions):
+        parser.error("会话名称不能重复")
+    return args
+
+
+async def login_account(name: str, settings: Settings) -> bool:
+    print(f"\n正在登录会话 [{name}]，请使用对应测试账号的手机号。")
+    print("请勿同时用其他进程操作同一个会话文件。")
+    client = TelegramClient(
+        str(SESSION_DIR / name),
+        settings.tg_api_id,
+        settings.tg_api_hash,
+        proxy=("http", "127.0.0.1", 7890),
+        timeout=10,
+        connection_retries=2,
+    )
     try:
-        print("🔌 Attempting connection with proxy (127.0.0.1:7890)...")
-        client = TelegramClient(
-            SESSION,
-            settings.tg_api_id,
-            settings.tg_api_hash,
-            proxy=('http', '127.0.0.1', 7890)
-        )
         await client.connect()
         if not await client.is_user_authorized():
-            print("✅ Proxy connected, but session not authenticated.")
-            print("Starting authentication flow...\n")
-            await client.start()
+            await client.start(
+                phone=lambda: input(f"[{name}] 手机号（含国家区号）: ").strip(),
+                code_callback=lambda: getpass(f"[{name}] Telegram验证码（输入隐藏）: ").strip(),
+                password=lambda: getpass(f"[{name}] 两步验证密码（输入隐藏）: "),
+            )
         else:
-            print("✅ Already logged in!")
-    except Exception as e:
-        print(f"⚠️  Proxy failed: {e}")
-        print("Trying without proxy...\n")
-        client = TelegramClient(SESSION, settings.tg_api_id, settings.tg_api_hash)
-        await client.connect()
-        if not await client.is_user_authorized():
-            await client.start()
-        else:
-            print("✅ Already logged in!")
+            print(f"[{name}] 已认证，跳过重复登录。")
+        if await client.get_me() is None:
+            print(f"[{name}] 尚未完成认证。")
+            return False
+    finally:
+        await client.disconnect()
+    print(f"[{name}] LOGIN SUCCESSFUL — 已保存 sessions/{name}.session")
+    return True
 
-    # Get user info
-    me = await client.get_me()
-    print("\n" + "="*60)
-    print("✅ LOGIN SUCCESSFUL!")
-    print("="*60)
-    print(f"Name: {me.first_name} {me.last_name or ''}")
-    print(f"Username: @{me.username or 'N/A'}")
-    print(f"Phone: {me.phone}")
-    print(f"ID: {me.id}")
-    print("="*60)
-    print(f"\n💾 Session saved to: {SESSION}.session")
-    print("\n🚀 Next step:")
-    print("   Run: python live_chat_demo.py")
-    print("="*60 + "\n")
 
-    await client.disconnect()
+async def main(names: list[str]) -> int:
+    if not sys.stdin.isatty():
+        print("请在自己的交互式终端运行登录命令；不要把验证码或密码发送到聊天窗口。")
+        return 1
+    settings = Settings(_env_file=BACKEND_DIR / ".env")
+    if not settings.tg_api_id or not settings.tg_api_hash:
+        print("请先在 backend/.env 配置 TG_API_ID 和 TG_API_HASH。")
+        return 1
+    SESSION_DIR.mkdir(exist_ok=True)
+    succeeded = 0
+    for name in names:
+        try:
+            succeeded += await login_account(name, settings)
+        except EOFError:
+            print("终端输入已关闭，停止登录；已保存的会话保留。")
+            return 1
+        except Exception as exc:
+            print(f"[{name}] 登录失败（{type(exc).__name__}）；会话文件保留，不自动切换代理或删除会话。")
+            print("请检查代理、登录信息，以及是否有其他进程占用会话。")
+    print(f"\n认证成功 {succeeded}/{len(names)} 个会话；本命令只登录，不启动自动回复。")
+    return 0 if succeeded == len(names) else 1
 
-if __name__ == '__main__':
-    asyncio.run(main())
+
+if __name__ == "__main__":
+    args = parse_args()
+    try:
+        sys.exit(asyncio.run(main(args.sessions)))
+    except KeyboardInterrupt:
+        print("\n已取消登录，已保存的会话保留。")
+        sys.exit(130)

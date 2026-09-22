@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
@@ -6,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.main import manager
 from app.models.models import Task, Conversation, Message, IntelligenceRecord, TaskStatus
 from app.schemas.schemas import (
     ConversationResponse,
@@ -18,6 +18,39 @@ from app.schemas.schemas import (
 from app.workers.tasks import run_task
 
 router = APIRouter()
+
+
+def _get_manager():
+    from app.main import manager
+    return manager
+
+
+SESSION_DIR = Path(__file__).resolve().parent.parent.parent / "sessions"
+
+
+@router.get("/accounts")
+async def list_accounts():
+    """Return accounts based on session files in the sessions/ directory."""
+    accounts = []
+    if not SESSION_DIR.exists():
+        return accounts
+
+    for session_file in sorted(SESSION_DIR.glob("*.session")):
+        name = session_file.stem
+        stat = session_file.stat()
+        accounts.append({
+            "id": name,
+            "platform": "telegram",
+            "username": f"@{name}",
+            "health": "green",
+            "proxy_url": "http://127.0.0.1:7890",
+            "is_active": True,
+            "last_action_at": stat.st_mtime,
+            "created_at": stat.st_ctime,
+            "session_file": str(session_file.name),
+        })
+
+    return accounts
 
 
 # ── Tasks ──────────────────────────────────────────────
@@ -38,7 +71,7 @@ async def create_task(body: TaskCreate, db: AsyncSession = Depends(get_db)):
     await db.refresh(task)
 
     # Notify via WebSocket
-    await manager.broadcast({
+    await _get_manager().broadcast({
         "type": "task_created",
         "task_id": str(task.id),
         "name": task.name,
@@ -65,7 +98,7 @@ async def start_task(task_id: str, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     # Notify via WebSocket
-    await manager.send_to_task(task_id, {
+    await _get_manager().send_to_task(task_id, {
         "type": "task_started",
         "task_id": task_id,
     })
@@ -135,7 +168,7 @@ async def end_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
     await db.commit()
     
     # Notify via WebSocket
-    await manager.send_to_task(str(conv.task_id), {
+    await _get_manager().send_to_task(str(conv.task_id), {
         "type": "conversation_ended",
         "conversation_id": conv_id,
         "target_user_id": conv.target_user_id,

@@ -67,6 +67,45 @@ logger = logging.getLogger(__name__)
 # PID文件
 PID_FILE = Path(__file__).parent / "chat_demo.pid"
 
+WS_URL = "ws://localhost:8000/ws"
+
+
+class WSBridge:
+    """Connect to FastAPI WebSocket and push Telegram messages to frontend."""
+
+    def __init__(self, url: str = WS_URL):
+        self.url = url
+        self.ws = None
+        self.connected = False
+
+    async def connect(self):
+        try:
+            import websockets
+            self.ws = await websockets.connect(self.url)
+            self.connected = True
+            logger.info("🔗 WebSocket bridge connected to %s", self.url)
+        except Exception as e:
+            logger.warning("⚠️ WebSocket bridge failed: %s (frontend will not receive live updates)", e)
+            self.connected = False
+
+    async def send(self, message: dict):
+        if not self.connected or not self.ws:
+            return
+        try:
+            import json
+            await self.ws.send(json.dumps(message))
+        except Exception as e:
+            logger.warning("⚠️ WebSocket send failed: %s", e)
+            self.connected = False
+
+    async def close(self):
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.connected = False
+
 
 class PersistentChatBot:
     """持久化聊天机器人,带自动重连"""
@@ -80,6 +119,7 @@ class PersistentChatBot:
         self.last_activity = datetime.now()
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 100
+        self.ws_bridge = WSBridge()
 
     async def connect(self):
         """连接到Telegram,带重试机制"""
@@ -124,10 +164,22 @@ class PersistentChatBot:
             """处理新消息"""
             try:
                 user_id = str(event.sender_id)
-                user_name = event.sender.first_name or "Unknown"
+                sender = await event.get_sender()
+                user_name = getattr(sender, 'first_name', None) or "Unknown"
                 message_text = event.message.text or ""
 
                 logger.info(f"📨 收到消息 from {user_name} ({user_id}): {message_text[:50]}")
+
+                # Push incoming message to frontend
+                await self.ws_bridge.send({
+                    "type": "telegram_message",
+                    "direction": "inbound",
+                    "account": SESSION_NAME.split("/")[-1],
+                    "sender_id": user_id,
+                    "sender_name": user_name,
+                    "content": message_text,
+                    "timestamp": datetime.now().isoformat(),
+                })
 
                 # 检查是否被拉黑
                 from app.services.security.blocklist import is_blocked
@@ -149,6 +201,17 @@ class PersistentChatBot:
                 await self.client.send_message(event.chat_id, response)
                 logger.info(f"💬 已回复: {response[:100]}")
 
+                # Push outgoing message to frontend
+                await self.ws_bridge.send({
+                    "type": "telegram_message",
+                    "direction": "outbound",
+                    "account": SESSION_NAME.split("/")[-1],
+                    "sender_id": user_id,
+                    "sender_name": user_name,
+                    "content": response,
+                    "timestamp": datetime.now().isoformat(),
+                })
+
                 self.last_activity = datetime.now()
 
             except Exception as e:
@@ -159,14 +222,14 @@ class PersistentChatBot:
         try:
             # 检查验证状态
             if not verification_manager.is_verified(target_user_id):
-                challenge_msg = verification_manager.get_challenge_message(target_user_id)
-                if challenge_msg:
-                    return challenge_msg, ConvState.VERIFICATION
-
-                # 创建新的验证挑战
-                verification_manager.create_challenge_for_user(target_user_id)
-                challenge_msg = verification_manager.get_challenge_message(target_user_id)
-                return challenge_msg or "请回答: 10 + 5 = ?", ConvState.VERIFICATION
+                # Try to verify the user's answer first
+                if verification_manager.check_answer(target_user_id, message):
+                    logger.info(f"✅ 用户 {target_user_id} 通过验证!")
+                    # Fall through to AI engine below
+                else:
+                    # Not verified yet — send or resend challenge
+                    challenge_msg = verification_manager.get_challenge_message(target_user_id)
+                    return challenge_msg or "请回答: 10 + 5 = ?", ConvState.VERIFICATION
 
             # 调用对话引擎
             response, state = await self.engine.generate_response(
@@ -234,6 +297,9 @@ class PersistentChatBot:
             logger.error("无法连接,退出")
             return
 
+        # Connect WebSocket bridge to FastAPI
+        await self.ws_bridge.connect()
+
         # 设置消息处理器
         await self.setup_handlers()
 
@@ -253,6 +319,8 @@ class PersistentChatBot:
         finally:
             self.running = False
             heartbeat_task.cancel()
+
+            await self.ws_bridge.close()
 
             if self.client:
                 try:

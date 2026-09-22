@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import router as api_router
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -85,6 +84,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from app.api.routes import router as api_router
+
 app.include_router(api_router, prefix="/api/v1")
 
 
@@ -109,6 +110,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         channel = new_channel
                         manager.active_connections[channel].append(websocket)
                         await websocket.send_json({"type": "subscribed", "channel": channel})
+                elif message.get("type") == "telegram_message":
+                    await manager.broadcast(message, channel="global")
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect:

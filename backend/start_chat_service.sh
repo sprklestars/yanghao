@@ -99,20 +99,19 @@ case "$1" in
         ;;
 
     login)
-        echo "🔐 Telegram登录"
-        echo ""
-        python quick_login.py
+        shift
+        python quick_login.py "$@"
         ;;
 
     *)
-        echo "用法: $0 {start|stop|status|logs|login}"
+        echo "用法: $0 {start|stop|status|logs|login [会话名 ...]}"
         echo ""
         echo "命令说明:"
         echo "  start   - 启动聊天机器人"
         echo "  stop    - 停止聊天机器人"
         echo "  status  - 查看运行状态"
         echo "  logs    - 查看实时日志"
-        echo "  login   - 登录Telegram账号"
+        echo "  login   - 依次登录，如: $0 login test1 test2 test3"
         echo ""
         exit 1
         ;;
