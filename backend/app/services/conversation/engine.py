@@ -75,7 +75,8 @@ class ConversationEngine:
         state: ConvState,
         category: str,
         history: list[dict[str, str]],
-        target_user_id: str | None = None,  # New parameter for verification
+        target_user_id: str | None = None,
+        context_summary: str | None = None,
     ) -> tuple[str, ConvState]:
         # Handle verification first
         if state == ConvState.IDLE and target_user_id:
@@ -106,7 +107,11 @@ class ConversationEngine:
 
         stage_hint = STAGE_HINTS.get(state, "").format(category=category)
 
-        messages = [{"role": "system", "content": f"{system_prompt}\n\nCurrent stage instruction: {stage_hint}"}]
+        system_content = f"{system_prompt}\n\nCurrent stage instruction: {stage_hint}"
+        if context_summary:
+            system_content += f"\n\nPrevious interactions with this user:\n{context_summary}"
+
+        messages = [{"role": "system", "content": system_content}]
 
         # sliding window: last 20 messages
         for msg in history[-20:]:
@@ -182,3 +187,33 @@ class ConversationEngine:
             ConvState.COOLDOWN: "Xin lỗi nếu làm phiền bạn. Chúc bạn vui!",
         }
         return fallbacks.get(state, "Ok, cảm ơn bạn!")
+
+    async def update_context_summary(
+        self,
+        existing_summary: str | None,
+        incoming_message: str,
+        reply: str,
+        state: ConvState,
+    ) -> str:
+        """Generate an updated context summary after each exchange."""
+        prompt = (
+            "You are maintaining a memory profile of a person you're chatting with for OSINT purposes.\n"
+            "Given the existing summary (if any) and the latest message exchange, produce an updated concise summary.\n"
+            "Focus on: key facts learned, topics discussed, trust level, next steps, language preference.\n"
+            "Keep it under 200 words. Write in the same language as the conversation.\n\n"
+            f"Existing summary: {existing_summary or 'None yet'}\n"
+            f"Latest exchange:\n  Them: {incoming_message}\n  You: {reply}\n"
+            f"Current stage: {state.value}\n\n"
+            "Updated summary:"
+        )
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=300,
+            )
+            return (response.choices[0].message.content or "").strip()
+        except Exception as e:
+            logger.warning("Failed to update context summary: %s", e)
+            return existing_summary or ""

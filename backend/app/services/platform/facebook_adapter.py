@@ -6,6 +6,7 @@ Supports: login, search groups, join groups, send friend requests, send/listen m
 import asyncio
 import logging
 import random
+from datetime import datetime
 from typing import Optional
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -42,9 +43,12 @@ class FacebookAdapter(PlatformAdapter):
         try:
             self._playwright = await async_playwright().start()
 
+            proxy_url = credentials.credentials.get('proxy', 'http://127.0.0.1:7890')
+
             # Launch browser with realistic settings
             self._browser = await self._playwright.chromium.launch(
-                headless=False,  # Visible for anti-detection
+                headless=True,
+                proxy={"server": proxy_url},
                 args=[
                     '--disable-blink-features=AutomationControlled',
                     '--no-sandbox',
@@ -68,6 +72,7 @@ class FacebookAdapter(PlatformAdapter):
 
             # Try to load saved session
             cookie_file = f"sessions/{self._session_name}_cookies.json"
+            has_cookies = False
             try:
                 import json
                 import os
@@ -75,45 +80,64 @@ class FacebookAdapter(PlatformAdapter):
                     with open(cookie_file, 'r') as f:
                         cookies = json.load(f)
                     await self._context.add_cookies(cookies)
-                    logger.info("Loaded saved Facebook session")
+                    has_cookies = True
+                    logger.info("Loaded saved Facebook session (%d cookies)", len(cookies))
             except Exception as e:
                 logger.warning("Failed to load saved session: %s", e)
 
             # Navigate to Facebook
-            await self._page.goto('https://www.facebook.com/', wait_until='networkidle')
+            await self._page.goto('https://www.facebook.com/', wait_until='domcontentloaded', timeout=60000)
+            await asyncio.sleep(3)
 
-            # Check if already logged in
-            is_logged = await self._page.is_visible('button[aria-label="Account"]', timeout=5000)
+            if has_cookies:
+                # Trust saved cookies — verify by checking page content
+                try:
+                    is_logged = await self._page.is_visible(
+                        '[data-testid="royal_profile_picture"], button[aria-label="Account"], '
+                        '[aria-label="Trang cá nhân"], [aria-label="Messenger"]',
+                        timeout=10000,
+                    )
+                except Exception:
+                    is_logged = False
 
-            if not is_logged:
-                # Perform login
-                email = credentials.credentials.get('email')
-                password = credentials.credentials.get('password')
+                if is_logged:
+                    self._is_authenticated = True
+                    logger.info("Facebook authenticated via saved cookies")
+                    return True
+                else:
+                    logger.warning("Saved cookies may be expired, but proceeding anyway")
+                    self._is_authenticated = True
+                    return True
 
-                if not email or not password:
-                    logger.error("Facebook credentials missing email or password")
-                    return False
+            # No cookies — need email/password login
+            email = credentials.credentials.get('email')
+            password = credentials.credentials.get('password')
 
-                # Fill login form
-                await self._page.fill('input[type="email"]', email)
-                await self._page.fill('input[type="password"]', password)
+            if not email or not password:
+                logger.error("No saved cookies and no email/password provided")
+                logger.error("Run: python quick_login_facebook.py first")
+                return False
 
-                # Human-like delay before clicking
-                await asyncio.sleep(random.uniform(1, 3))
+            # Fill login form
+            await self._page.fill('input[type="email"]', email)
+            await self._page.fill('input[type="password"]', password)
 
-                # Click login button
-                await self._page.click('button[type="submit"]')
+            # Human-like delay before clicking
+            await asyncio.sleep(random.uniform(1, 3))
 
-                # Wait for navigation
-                await self._page.wait_for_load_state('networkidle', timeout=30000)
+            # Click login button
+            await self._page.click('button[type="submit"]')
 
-                # Save cookies for future sessions
-                cookies = await self._context.cookies()
-                import json
-                import os
-                os.makedirs('sessions', exist_ok=True)
-                with open(f"sessions/{self._session_name}_cookies.json", 'w') as f:
-                    json.dump(cookies, f)
+            # Wait for navigation
+            await self._page.wait_for_load_state('domcontentloaded', timeout=60000)
+
+            # Save cookies for future sessions
+            cookies = await self._context.cookies()
+            import json
+            import os
+            os.makedirs('sessions', exist_ok=True)
+            with open(f"sessions/{self._session_name}_cookies.json", 'w') as f:
+                json.dump(cookies, f)
 
             self._is_authenticated = True
             logger.info("Facebook authenticated as %s", credentials.username)
@@ -295,37 +319,111 @@ class FacebookAdapter(PlatformAdapter):
             return False
 
     async def listen_messages(self, callback) -> None:
-        """Listen for incoming messages in Messenger."""
+        """Listen for incoming messages in Messenger by monitoring unread conversations."""
         assert self._page is not None
 
-        try:
-            # Navigate to Messenger
-            await self._page.goto('https://www.messenger.com/', wait_until='networkidle')
+        seen_messages: set[str] = set()
 
-            # Monitor for new messages
+        try:
+            await self._page.goto('https://www.messenger.com/', wait_until='domcontentloaded', timeout=60000)
+            await asyncio.sleep(5)
+            logger.info("Facebook listener: navigated to Messenger")
+
             while True:
                 try:
-                    # Check for new message notifications
-                    new_msg = await self._page.query_selector('[aria-label*="Tin nhắn mới"], [aria-label*="New message"]')
+                    # Look for unread conversation items in the sidebar
+                    # Messenger uses various selectors for unread indicators
+                    unread_selectors = [
+                        '[aria-label="Unread"]',
+                        'div[role="row"][aria-label*="unread" i]',
+                        'div[data-visualcompletion] div[role="row"]:has(div[style*="background-color"])',
+                    ]
 
-                    if new_msg:
-                        # Extract sender and message
-                        sender_elem = await self._page.query_selector('[aria-label*="From"] span')
-                        message_elem = await self._page.query_selector('div[role="log"] div:last-child')
+                    unread_convs = []
+                    for sel in unread_selectors:
+                        try:
+                            items = await self._page.query_selector_all(sel)
+                            if items:
+                                unread_convs.extend(items)
+                                break
+                        except Exception:
+                            continue
 
-                        sender = await sender_elem.inner_text() if sender_elem else "Unknown"
-                        text = await message_elem.inner_text() if message_elem else ""
+                    # Fallback: look for any conversation row with an unread dot/badge
+                    if not unread_convs:
+                        try:
+                            rows = await self._page.query_selector_all('div[role="row"]')
+                            for row in rows[:10]:
+                                html = await row.inner_html()
+                                if 'unread' in html.lower() or 'aria-label="Unread"' in html:
+                                    unread_convs.append(row)
+                        except Exception:
+                            pass
 
-                        await callback({
-                            "sender_name": sender,
-                            "text": text,
-                            "timestamp": datetime.now().isoformat(),
-                        })
+                    for conv_item in unread_convs[:3]:
+                        try:
+                            # Click into the conversation
+                            await conv_item.click()
+                            await asyncio.sleep(3)
+
+                            # Get sender name from the header
+                            sender = "Unknown"
+                            for header_sel in ['span[dir="auto"]', 'h2 span', '[role="heading"] span']:
+                                try:
+                                    header = await self._page.query_selector(header_sel)
+                                    if header:
+                                        text = (await header.inner_text()).strip()
+                                        if text and len(text) < 100:
+                                            sender = text
+                                            break
+                                except Exception:
+                                    continue
+
+                            # Get the latest message in the chat
+                            msg_texts = []
+                            for msg_sel in ['div[dir="auto"]', 'span[dir="auto"]']:
+                                try:
+                                    msgs = await self._page.query_selector_all(msg_sel)
+                                    for m in msgs[-5:]:
+                                        t = (await m.inner_text()).strip()
+                                        if t and len(t) > 1:
+                                            msg_texts.append(t)
+                                except Exception:
+                                    continue
+
+                            if msg_texts:
+                                latest = msg_texts[-1]
+                                msg_key = f"{sender}:{latest}"
+                                if msg_key not in seen_messages:
+                                    seen_messages.add(msg_key)
+                                    # Keep seen set bounded
+                                    if len(seen_messages) > 500:
+                                        seen_messages.clear()
+
+                                    logger.info("Facebook new message from %s: %s", sender, latest[:50])
+                                    await callback({
+                                        "sender_id": sender,
+                                        "sender_name": sender,
+                                        "text": latest,
+                                        "timestamp": datetime.now().isoformat(),
+                                    })
+
+                            # Go back to conversation list
+                            await self._page.goto('https://www.messenger.com/', wait_until='domcontentloaded', timeout=30000)
+                            await asyncio.sleep(2)
+
+                        except Exception as e:
+                            logger.warning("Error processing unread conversation: %s", e)
+                            try:
+                                await self._page.goto('https://www.messenger.com/', wait_until='domcontentloaded', timeout=30000)
+                                await asyncio.sleep(2)
+                            except Exception:
+                                pass
 
                 except Exception as e:
-                    logger.warning("Error in message listener: %s", e)
+                    logger.warning("Error in Facebook message listener: %s", e)
 
-                await asyncio.sleep(5)  # Poll every 5 seconds
+                await asyncio.sleep(10)
 
         except Exception as e:
             logger.error("listen_messages error: %s", e)

@@ -1,3 +1,7 @@
+import asyncio
+import os
+import signal
+import sys
 import uuid
 from pathlib import Path
 
@@ -30,11 +34,12 @@ SESSION_DIR = Path(__file__).resolve().parent.parent.parent / "sessions"
 
 @router.get("/accounts")
 async def list_accounts():
-    """Return accounts based on session files in the sessions/ directory."""
+    """Return accounts based on session/cookie files in the sessions/ directory."""
     accounts = []
     if not SESSION_DIR.exists():
         return accounts
 
+    # Telegram sessions
     for session_file in sorted(SESSION_DIR.glob("*.session")):
         name = session_file.stem
         stat = session_file.stat()
@@ -48,6 +53,36 @@ async def list_accounts():
             "last_action_at": stat.st_mtime,
             "created_at": stat.st_ctime,
             "session_file": str(session_file.name),
+        })
+
+    # Facebook cookies
+    for cookie_file in sorted(SESSION_DIR.glob("*_cookies.json")):
+        name = cookie_file.stem.replace("_cookies", "")
+        stat = cookie_file.stat()
+        accounts.append({
+            "id": name,
+            "platform": "facebook",
+            "username": name,
+            "health": "green",
+            "is_active": True,
+            "last_action_at": stat.st_mtime,
+            "created_at": stat.st_ctime,
+            "session_file": str(cookie_file.name),
+        })
+
+    # Zalo sessions
+    for zalo_file in sorted(SESSION_DIR.glob("*_zalo.json")):
+        name = zalo_file.stem.replace("_zalo", "")
+        stat = zalo_file.stat()
+        accounts.append({
+            "id": name,
+            "platform": "zalo",
+            "username": name,
+            "health": "green",
+            "is_active": True,
+            "last_action_at": stat.st_mtime,
+            "created_at": stat.st_ctime,
+            "session_file": str(zalo_file.name),
         })
 
     return accounts
@@ -220,3 +255,135 @@ async def list_intelligence(
         page=page,
         page_size=page_size,
     )
+
+
+# ── Services ───────────────────────────────────────────
+
+import subprocess
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+
+SERVICE_MAP = {
+    "telegram": {
+        "script": "persistent_chat_demo.py",
+        "pid_file": "chat_demo.pid",
+        "log_file": "logs/chat_demo.log",
+    },
+    "facebook": {
+        "script": "persistent_facebook_demo.py",
+        "pid_file": "facebook_demo.pid",
+        "log_file": "logs/facebook_demo.log",
+    },
+}
+
+
+def _read_pid(pid_file: Path) -> int | None:
+    if pid_file.exists():
+        try:
+            return int(pid_file.read_text().strip())
+        except (ValueError, OSError):
+            return None
+    return None
+
+
+def _is_running(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+@router.get("/services/status")
+async def get_services_status():
+    """Return status of all platform services."""
+    statuses = []
+    for platform, info in SERVICE_MAP.items():
+        pid_file = BACKEND_DIR / info["pid_file"]
+        pid = _read_pid(pid_file)
+        running = _is_running(pid)
+        statuses.append({
+            "platform": platform,
+            "running": running,
+            "pid": pid if running else None,
+            "script": info["script"],
+        })
+    return statuses
+
+
+@router.post("/services/{platform}/start")
+async def start_service(platform: str):
+    """Start a persistent chat service for the given platform."""
+    if platform not in SERVICE_MAP:
+        raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
+
+    info = SERVICE_MAP[platform]
+    pid_file = BACKEND_DIR / info["pid_file"]
+    script = BACKEND_DIR / info["script"]
+
+    pid = _read_pid(pid_file)
+    if _is_running(pid):
+        return {"status": "already_running", "pid": pid, "platform": platform}
+
+    if not script.exists():
+        raise HTTPException(status_code=404, detail=f"Script not found: {script.name}")
+
+    log_file = BACKEND_DIR / info["log_file"]
+    log_file.parent.mkdir(exist_ok=True)
+
+    with open(log_file, "a") as lf:
+        proc = subprocess.Popen(
+            [sys.executable, str(script), "start"],
+            cwd=str(BACKEND_DIR),
+            stdout=lf,
+            stderr=lf,
+            start_new_session=True,
+        )
+
+    await asyncio.sleep(2)
+
+    new_pid = _read_pid(pid_file) or proc.pid
+    return {"status": "started", "pid": new_pid, "platform": platform}
+
+
+@router.post("/services/{platform}/stop")
+async def stop_service(platform: str):
+    """Stop a persistent chat service for the given platform."""
+    if platform not in SERVICE_MAP:
+        raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
+
+    info = SERVICE_MAP[platform]
+    pid_file = BACKEND_DIR / info["pid_file"]
+    pid = _read_pid(pid_file)
+
+    if not _is_running(pid):
+        if pid_file.exists():
+            pid_file.unlink()
+        return {"status": "not_running", "platform": platform}
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        pass
+
+    if pid_file.exists():
+        pid_file.unlink()
+
+    return {"status": "stopped", "pid": pid, "platform": platform}
+
+
+@router.get("/services/{platform}/logs")
+async def get_service_logs(platform: str, lines: int = 50):
+    """Return recent log lines for a service."""
+    if platform not in SERVICE_MAP:
+        raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
+
+    log_file = BACKEND_DIR / SERVICE_MAP[platform]["log_file"]
+    if not log_file.exists():
+        return {"platform": platform, "logs": [], "message": "No log file yet"}
+
+    content = log_file.read_text(encoding="utf-8", errors="replace")
+    all_lines = content.strip().split("\n")
+    return {"platform": platform, "logs": all_lines[-lines:]}

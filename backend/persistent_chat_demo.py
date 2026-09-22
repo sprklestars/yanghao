@@ -90,6 +90,8 @@ class WSBridge:
 
     async def send(self, message: dict):
         if not self.connected or not self.ws:
+            await self.connect()
+        if not self.connected or not self.ws:
             return
         try:
             import json
@@ -97,6 +99,14 @@ class WSBridge:
         except Exception as e:
             logger.warning("⚠️ WebSocket send failed: %s", e)
             self.connected = False
+            # Try reconnect once
+            await self.connect()
+            if self.connected and self.ws:
+                try:
+                    import json
+                    await self.ws.send(json.dumps(message))
+                except Exception:
+                    pass
 
     async def close(self):
         if self.ws:
@@ -231,6 +241,25 @@ class PersistentChatBot:
                     challenge_msg = verification_manager.get_challenge_message(target_user_id)
                     return challenge_msg or "请回答: 10 + 5 = ?", ConvState.VERIFICATION
 
+            # Load context summary from DB
+            context_summary = None
+            try:
+                from app.core.database import async_session_factory
+                from sqlalchemy import select as sa_select
+                from app.models.models import Conversation
+                async with async_session_factory() as session:
+                    result = await session.execute(
+                        sa_select(Conversation).where(
+                            Conversation.target_user_id == target_user_id,
+                            Conversation.ended_at.is_(None),
+                        )
+                    )
+                    conv = result.scalar_one_or_none()
+                    if conv:
+                        context_summary = conv.context_summary
+            except Exception as e:
+                logger.debug("Could not load context_summary: %s", e)
+
             # 调用对话引擎
             response, state = await self.engine.generate_response(
                 incoming_message=message,
@@ -239,7 +268,33 @@ class PersistentChatBot:
                 category=self.category,
                 history=[],
                 target_user_id=target_user_id,
+                context_summary=context_summary,
             )
+
+            # Update context summary
+            try:
+                updated_summary = await self.engine.update_context_summary(
+                    existing_summary=context_summary,
+                    incoming_message=message,
+                    reply=response,
+                    state=state,
+                )
+                from app.core.database import async_session_factory
+                from sqlalchemy import select as sa_select
+                from app.models.models import Conversation
+                async with async_session_factory() as session:
+                    result = await session.execute(
+                        sa_select(Conversation).where(
+                            Conversation.target_user_id == target_user_id,
+                            Conversation.ended_at.is_(None),
+                        )
+                    )
+                    conv = result.scalar_one_or_none()
+                    if conv:
+                        conv.context_summary = updated_summary
+                        await session.commit()
+            except Exception as e:
+                logger.debug("Could not save context_summary: %s", e)
 
             return response, state
 

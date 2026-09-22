@@ -1,3 +1,6 @@
+import uuid
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 from app.models.models import (
@@ -22,15 +25,15 @@ class TaskCreate(BaseModel):
 
 
 class TaskResponse(BaseModel):
-    id: str
+    id: uuid.UUID
     name: str
     platform: Platform
     category: IntelligenceCategory
     keywords: list[str]
     target_region: str | None
     status: TaskStatus
-    created_at: str
-    updated_at: str
+    created_at: datetime
+    updated_at: datetime
 
     model_config = {"from_attributes": True}
 
@@ -38,25 +41,25 @@ class TaskResponse(BaseModel):
 # ── Conversation Schemas ──────────────────────────────
 
 class MessageResponse(BaseModel):
-    id: str
+    id: uuid.UUID
     direction: str
     content: str
     language: str | None
-    created_at: str
+    created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 class ConversationResponse(BaseModel):
-    id: str
-    account_id: str
-    task_id: str
+    id: uuid.UUID
+    account_id: uuid.UUID
+    task_id: uuid.UUID
     target_user_id: str
     target_display_name: str | None
     state: ConversationState
     turn_count: int
-    started_at: str
-    ended_at: str | None
+    started_at: datetime
+    ended_at: datetime | None
     messages: list[MessageResponse] = []
 
     model_config = {"from_attributes": True}
@@ -65,8 +68,8 @@ class ConversationResponse(BaseModel):
 # ── Intelligence Schemas ──────────────────────────────
 
 class IntelligenceResponse(BaseModel):
-    id: str
-    task_id: str
+    id: uuid.UUID
+    task_id: uuid.UUID
     platform: Platform
     target_user_id: str
     display_name: str | None
@@ -77,11 +80,11 @@ class IntelligenceResponse(BaseModel):
     extracted_contacts: dict
     business_info: dict
     activity_status: ActivityStatus
-    last_seen: str | None
+    last_seen: datetime | None
     response_rate: float | None
     review_status: ReviewStatus
     operator_notes: str | None
-    collected_at: str
+    collected_at: datetime
 
     model_config = {"from_attributes": True}
 

@@ -305,7 +305,17 @@ def process_incoming_message(message_data: dict):
             state=ConvState(conv.state.value),
             category=conv.task.category.value,
             history=history,
+            context_summary=conv.context_summary,
         ))
+
+        # Update context summary with this exchange
+        updated_summary = loop.run_until_complete(engine.update_context_summary(
+            existing_summary=conv.context_summary,
+            incoming_message=text,
+            reply=response,
+            state=new_state,
+        ))
+        conv.context_summary = updated_summary
         loop.close()
 
         # Send response via adapter
