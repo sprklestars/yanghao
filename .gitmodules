@@ -1,0 +1,3 @@
+[submodule "yanghao"]
+	path = yanghao
+	url = https://github.com/sprklestars/yanghao.git

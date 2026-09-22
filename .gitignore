@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+venv/
+
+# Build output
+.next/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets & credentials
+.env
+*.session
+*.session-journal
+
+# Runtime artifacts
+*.pid
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
