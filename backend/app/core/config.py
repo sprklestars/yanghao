@@ -11,9 +11,9 @@ class Settings(BaseSettings):
     tg_api_id: int = 0
     tg_api_hash: str = ""
 
-    # Database
-    database_url: str = "postgresql+asyncpg://osint:osint@localhost:5432/osint"
-    database_url_sync: str = "postgresql://osint:osint@localhost:5432/osint"
+    # Database (must be set in .env)
+    database_url: str = ""
+    database_url_sync: str = ""
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

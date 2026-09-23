@@ -33,7 +33,10 @@ def create_demo_data():
     """创建演示数据"""
 
     # 使用同步引擎
-    engine = create_engine("postgresql://osint:osint@localhost:5432/osint")
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from app.core.config import settings
+    engine = create_engine(settings.database_url_sync or "postgresql://osint:osint@localhost:5432/osint")
 
     with Session(engine) as db:
         print("🌱 开始生成演示数据...")

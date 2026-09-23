@@ -48,14 +48,14 @@ TG_API_ID=<your_telegram_api_id>
 TG_API_HASH=<your_telegram_api_hash>
 
 # Database
-DATABASE_URL=postgresql+asyncpg://osint:osint@localhost:5432/osint
-DATABASE_URL_SYNC=postgresql://osint:osint@localhost:5432/osint
+DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/dbname
+DATABASE_URL_SYNC=postgresql://user:password@localhost:5432/dbname
 
 # Redis
 REDIS_URL=redis://localhost:6379/0
 
 # Security
-SECRET_KEY=osint-poc-dev-secret-key-change-in-production
+SECRET_KEY=change-me-to-a-random-secret-key
 ACCESS_TOKEN_EXPIRE_MINUTES=1440
 
 # App

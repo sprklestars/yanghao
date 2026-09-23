@@ -58,8 +58,8 @@ TG_API_ID=12345678
 TG_API_HASH=your_api_hash_here
 
 # Database (Docker Compose会自动配置)
-DATABASE_URL=postgresql+asyncpg://osint:osint@postgres:5432/osint
-DATABASE_URL_SYNC=postgresql://osint:osint@postgres:5432/osint
+DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/dbname
+DATABASE_URL_SYNC=postgresql://user:password@postgres:5432/dbname
 REDIS_URL=redis://redis:6379/0
 ```
 

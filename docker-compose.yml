@@ -41,9 +41,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: osint
-      POSTGRES_USER: osint
-      POSTGRES_PASSWORD: osint
+      POSTGRES_DB: ${POSTGRES_DB:-osint}
+      POSTGRES_USER: ${POSTGRES_USER:-osint}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-osint}
     ports:
       - "5432:5432"
     volumes:
