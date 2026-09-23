@@ -33,7 +33,7 @@ const MOCK_TASKS: Task[] = [
     platform: 'telegram',
     category: 'private_investigator',
     keywords: ['thám tử', 'điều tra', 'theo dõi'],
-    target_region: null,
+    target_region: undefined,
     status: 'pending',
     created_at: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
     updated_at: new Date().toISOString(),
@@ -54,7 +54,7 @@ export default function TasksPage() {
 
   // Connect WebSocket on mount
   useEffect(() => {
-    wsClient.connect('global');
+    wsClient.connect();
 
     wsClient.on('task_created', () => loadTasks());
     wsClient.on('task_started', () => loadTasks());

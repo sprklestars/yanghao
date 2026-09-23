@@ -197,6 +197,148 @@ async def zalo_login(body: dict):
         raise HTTPException(400, f"Zalo login error: {e}")
 
 
+# ── Group Management ────────────────────────────────────
+
+@router.post("/groups/search")
+async def search_groups(body: dict):
+    """Search Telegram groups by keyword or natural language query."""
+    from app.services.platform.telegram_adapter import TelegramAdapter
+    from app.services.platform.base import AccountCredentials, PlatformName
+    from app.core.config import settings
+
+    query = body.get("query", "").strip()
+    account = body.get("account", "printer").strip()
+    use_ai = body.get("use_ai", False)
+
+    if not query:
+        raise HTTPException(400, "query is required")
+
+    # If AI mode, use LLM to generate better search keywords
+    if use_ai:
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
+            resp = await client.chat.completions.create(
+                model=settings.deepseek_model,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"User wants to find Telegram groups about: \"{query}\"\n"
+                        "Generate 3-5 short search keywords (in the most likely language of the groups) "
+                        "that would find relevant Telegram groups. Return ONLY the keywords, one per line."
+                    ),
+                }],
+                temperature=0.3,
+                max_tokens=100,
+            )
+            ai_keywords = [k.strip() for k in (resp.choices[0].message.content or "").strip().split("\n") if k.strip()]
+            logger.info("AI generated search keywords: %s", ai_keywords)
+        except Exception as e:
+            logger.warning("AI keyword generation failed: %s", e)
+            ai_keywords = []
+    else:
+        ai_keywords = []
+
+    # Search with original query + AI keywords
+    session_path = str(SESSION_DIR / account)
+    adapter = TelegramAdapter(api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, session_name=session_path)
+    creds = AccountCredentials(platform=PlatformName.TELEGRAM, username=account, credentials={})
+
+    try:
+        await adapter.authenticate(creds)
+        all_results = []
+        seen_ids = set()
+
+        search_terms = [query] + ai_keywords
+        for term in search_terms[:5]:
+            results = await adapter.search_groups(term, limit=10)
+            for g in results:
+                if g.group_id not in seen_ids:
+                    seen_ids.add(g.group_id)
+                    all_results.append({
+                        "group_id": g.group_id,
+                        "name": g.name,
+                        "member_count": g.member_count,
+                        "description": g.description,
+                    })
+
+        await adapter.disconnect()
+        return {"results": all_results[:20], "keywords_used": search_terms}
+    except Exception as e:
+        raise HTTPException(400, f"Group search failed: {e}")
+
+
+@router.post("/groups/join")
+async def join_group(body: dict):
+    """Join a Telegram group by ID."""
+    from app.services.platform.telegram_adapter import TelegramAdapter
+    from app.services.platform.base import AccountCredentials, PlatformName
+    from app.core.config import settings
+
+    group_id = body.get("group_id", "").strip()
+    account = body.get("account", "printer").strip()
+
+    if not group_id:
+        raise HTTPException(400, "group_id is required")
+
+    session_path = str(SESSION_DIR / account)
+    adapter = TelegramAdapter(api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, session_name=session_path)
+    creds = AccountCredentials(platform=PlatformName.TELEGRAM, username=account, credentials={})
+
+    try:
+        await adapter.authenticate(creds)
+        success = await adapter.join_group(group_id)
+        await adapter.disconnect()
+        if success:
+            return {"status": "joined", "group_id": group_id}
+        else:
+            return {"status": "failed", "message": "Could not join group"}
+    except Exception as e:
+        raise HTTPException(400, f"Join group failed: {e}")
+
+
+@router.post("/groups/add-by-link")
+async def add_group_by_link(body: dict):
+    """Join a Telegram group by invite link or username."""
+    from app.services.platform.telegram_adapter import TelegramAdapter
+    from app.services.platform.base import AccountCredentials, PlatformName
+    from app.core.config import settings
+
+    link = body.get("link", "").strip()
+    account = body.get("account", "printer").strip()
+
+    if not link:
+        raise HTTPException(400, "link is required")
+
+    session_path = str(SESSION_DIR / account)
+    adapter = TelegramAdapter(api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, session_name=session_path)
+    creds = AccountCredentials(platform=PlatformName.TELEGRAM, username=account, credentials={})
+
+    try:
+        await adapter.authenticate(creds)
+        client = adapter._client
+
+        # Handle t.me links or @username
+        if link.startswith("http"):
+            entity = await client.get_entity(link)
+        elif link.startswith("@"):
+            entity = await client.get_entity(link)
+        else:
+            entity = await client.get_entity(f"@{link}")
+
+        group_id = str(entity.id)
+        success = await adapter.join_group(group_id)
+        title = getattr(entity, "title", link)
+        await adapter.disconnect()
+
+        if success:
+            return {"status": "joined", "group_id": group_id, "name": title}
+        else:
+            return {"status": "failed", "message": f"Could not join {title}"}
+    except Exception as e:
+        raise HTTPException(400, f"Add group failed: {e}")
+
+
 # ── Tasks ──────────────────────────────────────────────
 
 @router.post("/tasks", response_model=TaskResponse)

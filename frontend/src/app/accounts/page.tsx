@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { type Account, DEMO_ACCOUNTS, accountAPI, serviceAPI, type ServiceStatus, wsClient } from '@/lib/api';
+import { type Account, DEMO_ACCOUNTS, accountAPI, serviceAPI, type ServiceStatus, wsClient, fetchAPI } from '@/lib/api';
 
 const PLATFORM_ICONS: Record<string, string> = {
   telegram: '✈️',
@@ -147,7 +147,7 @@ export default function AccountsPage() {
     return { label: '成熟期', color: 'text-green-600' };
   };
 
-  const platforms = [...new Set(accounts.map((a) => a.platform))];
+  const platforms = Array.from(new Set(accounts.map((a) => a.platform)));
 
   const openLoginModal = () => {
     setLoginStep('platform');
@@ -306,7 +306,6 @@ export default function AccountsPage() {
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
-                            <span className="text-xs text-gray-400">{account.session_file}</span>
                             <button
                               onClick={() => setChatView(isChatOpen ? null : account.id)}
                               className={`px-3 py-1.5 rounded text-sm ${isChatOpen ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
