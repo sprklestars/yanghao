@@ -88,6 +88,115 @@ async def list_accounts():
     return accounts
 
 
+# ── Account Login Flow ─────────────────────────────────
+
+_pending_logins: dict[str, object] = {}
+
+
+@router.post("/accounts/telegram/send-code")
+async def telegram_send_code(body: dict):
+    """Send verification code to a phone number for Telegram login."""
+    from telethon import TelegramClient
+    from app.core.config import settings
+
+    phone = body.get("phone", "").strip()
+    session_name = body.get("session_name", "").strip()
+    if not phone or not session_name:
+        raise HTTPException(400, "phone and session_name are required")
+
+    session_path = str(SESSION_DIR / session_name)
+    client = TelegramClient(session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash)
+
+    try:
+        await client.connect()
+        result = await client.send_code_request(phone)
+        _pending_logins[session_name] = {
+            "client": client,
+            "phone": phone,
+            "phone_code_hash": result.phone_code_hash,
+        }
+        return {"status": "code_sent", "session_name": session_name}
+    except Exception as e:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        raise HTTPException(400, f"Failed to send code: {e}")
+
+
+@router.post("/accounts/telegram/verify-code")
+async def telegram_verify_code(body: dict):
+    """Verify the code and complete Telegram login."""
+    session_name = body.get("session_name", "").strip()
+    code = body.get("code", "").strip()
+    password = body.get("password", "").strip() or None
+
+    pending = _pending_logins.get(session_name)
+    if not pending:
+        raise HTTPException(400, "No pending login for this session. Send code first.")
+
+    client = pending["client"]
+    phone = pending["phone"]
+
+    try:
+        await client.sign_in(
+            phone=phone,
+            code=code,
+            phone_code_hash=pending["phone_code_hash"],
+            password=password,
+        )
+        me = await client.get_me()
+        username = getattr(me, 'username', None) or getattr(me, 'first_name', 'Unknown')
+        await client.disconnect()
+        del _pending_logins[session_name]
+        return {"status": "success", "username": username, "user_id": me.id}
+    except Exception as e:
+        error_msg = str(e)
+        if "password" in error_msg.lower() or "Two-steps" in error_msg:
+            return {"status": "need_password", "message": "This account requires a 2FA password"}
+        raise HTTPException(400, f"Verification failed: {e}")
+
+
+@router.post("/accounts/facebook/login")
+async def facebook_login_start(body: dict):
+    """Start Facebook login by opening a visible browser for manual login."""
+    session_name = body.get("session_name", "fb_default").strip()
+    return {
+        "status": "instructions",
+        "message": f"Run: python quick_login_facebook.py {session_name}",
+        "session_name": session_name,
+    }
+
+
+@router.post("/accounts/zalo/login")
+async def zalo_login(body: dict):
+    """Login to Zalo with phone and password."""
+    from app.services.platform.base import PlatformName, AccountCredentials
+    from app.services.platform.zalo_adapter import ZaloAdapter
+
+    phone = body.get("phone", "").strip()
+    password = body.get("password", "").strip()
+    session_name = body.get("session_name", "").strip()
+
+    if not phone or not password or not session_name:
+        raise HTTPException(400, "phone, password, and session_name are required")
+
+    try:
+        adapter = ZaloAdapter()
+        credentials = AccountCredentials(
+            platform=PlatformName.ZALO,
+            username=session_name,
+            credentials={"phone": phone, "password": password},
+        )
+        result = await adapter.authenticate(credentials)
+        if result:
+            return {"status": "success", "session_name": session_name}
+        else:
+            return {"status": "failed", "message": "Zalo authentication failed"}
+    except Exception as e:
+        raise HTTPException(400, f"Zalo login error: {e}")
+
+
 # ── Tasks ──────────────────────────────────────────────
 
 @router.post("/tasks", response_model=TaskResponse)

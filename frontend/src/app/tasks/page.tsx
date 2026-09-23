@@ -3,10 +3,7 @@
 import { useEffect, useState } from 'react';
 import { fetchAPI, wsClient, type Task } from '@/lib/api';
 
-// 演示模式 - 使用模拟数据
-const DEMO_MODE = true; // 设置为false连接真实后端
-
-// 模拟任务数据
+// 模拟数据 (仅在后端不可达时作为降级)
 const MOCK_TASKS: Task[] = [
   {
     id: 'task-001',
@@ -44,8 +41,9 @@ const MOCK_TASKS: Task[] = [
 ];
 
 export default function TasksPage() {
-  const [tasks, setTasks] = useState<Task[]>(DEMO_MODE ? MOCK_TASKS : []);
-  const [loaded, setLoaded] = useState(DEMO_MODE);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [demoFallback, setDemoFallback] = useState(false);
   const [form, setForm] = useState({
     name: '',
     platform: 'telegram',
@@ -56,66 +54,32 @@ export default function TasksPage() {
 
   // Connect WebSocket on mount
   useEffect(() => {
-    if (!DEMO_MODE) {
-      wsClient.connect('global');
+    wsClient.connect('global');
 
-      // Listen for task updates
-      wsClient.on('task_created', (data) => {
-        console.log('New task created:', data.task_id);
-        loadTasks();
-      });
-
-      wsClient.on('task_started', (data) => {
-        console.log('Task started:', data.task_id);
-        loadTasks();
-      });
-    }
+    wsClient.on('task_created', () => loadTasks());
+    wsClient.on('task_started', () => loadTasks());
 
     return () => {
-      if (!DEMO_MODE) {
-        wsClient.disconnect();
-      }
+      wsClient.disconnect();
     };
   }, []);
 
   async function loadTasks() {
-    if (DEMO_MODE) {
-      setTasks(MOCK_TASKS);
-      setLoaded(true);
-      return;
-    }
-
     try {
       const data = await fetchAPI('/tasks');
       setTasks(data);
       setLoaded(true);
+      setDemoFallback(false);
     } catch (error) {
       console.error('Failed to load tasks:', error);
-      // Fallback to mock data if API fails
       setTasks(MOCK_TASKS);
       setLoaded(true);
+      setDemoFallback(true);
     }
   }
 
   async function createTask(e: React.FormEvent) {
     e.preventDefault();
-
-    if (DEMO_MODE) {
-      const newTask: Task = {
-        id: `task-${Date.now()}`,
-        name: form.name,
-        platform: form.platform,
-        category: form.category,
-        keywords: form.keywords.split(',').map((k) => k.trim()).filter(Boolean),
-        target_region: form.target_region || null,
-        status: 'pending',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      setTasks([...tasks, newTask]);
-      setForm({ name: '', platform: 'telegram', category: 'private_investigator', keywords: '', target_region: '' });
-      return;
-    }
 
     try {
       await fetchAPI('/tasks', {
@@ -134,14 +98,6 @@ export default function TasksPage() {
   }
 
   async function startTask(taskId: string) {
-    if (DEMO_MODE) {
-      setTasks(tasks.map(t => t.id === taskId ? { ...t, status: 'running' } : t));
-      setTimeout(() => {
-        setTasks(tasks.map(t => t.id === taskId ? { ...t, status: 'completed' } : t));
-      }, 3000);
-      return;
-    }
-
     try {
       await fetchAPI(`/tasks/${taskId}/start`, { method: 'POST' });
       loadTasks();
@@ -155,10 +111,10 @@ export default function TasksPage() {
     <div>
       <h2 className="text-2xl font-bold mb-4">📋 任务管理</h2>
 
-      {DEMO_MODE && (
-        <div className="bg-blue-50 border-l-4 border-blue-500 p-3 mb-4 rounded">
-          <p className="text-sm text-blue-700">
-            💡 <strong>演示模式:</strong> 当前使用模拟数据,无需后端服务。刷新页面数据会重置。
+      {demoFallback && (
+        <div className="bg-yellow-50 border-l-4 border-yellow-500 p-3 mb-4 rounded">
+          <p className="text-sm text-yellow-700">
+            💡 <strong>演示模式:</strong> 后端不可达，显示模拟数据。
           </p>
         </div>
       )}
@@ -211,11 +167,9 @@ export default function TasksPage() {
 
       <div className="flex items-center gap-3 mb-3">
         <h3 className="font-semibold">📝 任务列表</h3>
-        {!DEMO_MODE && (
-          <button onClick={loadTasks} className="text-sm text-blue-600 hover:underline">
-            {loaded ? '刷新' : '加载任务'}
-          </button>
-        )}
+        <button onClick={loadTasks} className="text-sm text-blue-600 hover:underline">
+          {loaded ? '刷新' : '加载任务'}
+        </button>
       </div>
 
       {loaded && tasks.length === 0 && <p className="text-gray-500">暂无任务,创建一个吧!</p>}

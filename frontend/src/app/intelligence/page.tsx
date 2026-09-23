@@ -3,30 +3,17 @@
 import { useState } from 'react';
 import { fetchAPI, type IntelligenceRecord, DEMO_INTELLIGENCE } from '@/lib/api';
 
-// 演示模式 - 使用模拟数据
-const DEMO_MODE = true;
+// 自动检测: 优先使用真实API，失败时降级到模拟数据
+const DEMO_MODE = false;
 
 export default function IntelligencePage() {
-  const [records, setRecords] = useState<IntelligenceRecord[]>(DEMO_MODE ? DEMO_INTELLIGENCE : []);
-  const [total, setTotal] = useState(DEMO_MODE ? DEMO_INTELLIGENCE.length : 0);
-  const [loaded, setLoaded] = useState(DEMO_MODE);
+  const [records, setRecords] = useState<IntelligenceRecord[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const [demoFallback, setDemoFallback] = useState(false);
   const [filters, setFilters] = useState({ category: '', platform: '' });
 
   async function loadRecords() {
-    if (DEMO_MODE) {
-      let filtered = DEMO_INTELLIGENCE;
-      if (filters.category) {
-        filtered = filtered.filter(r => r.category === filters.category);
-      }
-      if (filters.platform) {
-        filtered = filtered.filter(r => r.platform === filters.platform);
-      }
-      setRecords(filtered);
-      setTotal(filtered.length);
-      setLoaded(true);
-      return;
-    }
-
     try {
       const params = new URLSearchParams();
       if (filters.category) params.set('category', filters.category);
@@ -35,20 +22,22 @@ export default function IntelligencePage() {
       setRecords(data.items);
       setTotal(data.total);
       setLoaded(true);
+      setDemoFallback(false);
     } catch (error) {
       console.error('Failed to load intelligence:', error);
       setRecords(DEMO_INTELLIGENCE);
       setTotal(DEMO_INTELLIGENCE.length);
       setLoaded(true);
+      setDemoFallback(true);
     }
   }
 
   return (
     <div className="flex flex-col h-[calc(100vh-3rem)]">
-      {/* Demo mode banner */}
-      {DEMO_MODE && (
+      {/* Fallback banner when API is unreachable */}
+      {demoFallback && (
         <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2 text-sm text-yellow-800 mb-4 rounded">
-          💡 <strong>演示模式:</strong> 当前使用模拟数据,无需后端服务。刷新页面数据会重置。
+          💡 <strong>演示模式:</strong> 后端不可达，显示模拟数据。启动后端后将显示真实情报。
         </div>
       )}
 
