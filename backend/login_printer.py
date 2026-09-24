@@ -3,7 +3,9 @@ Login script for printer Telegram account.
 Creates a new session file for automated chat demo.
 """
 import asyncio
+
 from telethon import TelegramClient
+
 from app.core.config import settings
 
 SESSION_NAME = 'sessions/printer'
@@ -37,7 +39,7 @@ async def main():
     me = await client.get_me()
     print()
     print("=" * 70)
-    print(f"✅ Login successful!")
+    print("✅ Login successful!")
     print(f"   User: {me.first_name} {me.last_name or ''}")
     print(f"   Username: @{me.username or 'N/A'}")
     print(f"   Phone: {me.phone}")

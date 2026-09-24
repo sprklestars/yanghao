@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
-from getpass import getpass
-from pathlib import Path
 import re
 import sys
+from getpass import getpass
+from pathlib import Path
 
 from telethon import TelegramClient
 

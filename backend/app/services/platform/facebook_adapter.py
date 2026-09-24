@@ -9,7 +9,7 @@ import random
 from datetime import datetime
 from typing import Optional
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from app.services.platform.base import (
     AccountCredentials,
@@ -645,7 +645,9 @@ class FacebookAdapter(PlatformAdapter):
         )
 
     async def is_session_valid(self) -> dict:
-        import json, os, time
+        import json
+        import os
+        import time
         cookie_file = f"sessions/{self._session_name}_cookies.json"
         if not os.path.exists(cookie_file):
             return {"valid": False, "message": "Cookie 文件不存在，请先登录", "details": {}}

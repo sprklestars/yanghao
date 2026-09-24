@@ -13,17 +13,18 @@
 
 import asyncio
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from telethon import TelegramClient
+
+from app.core.config import settings
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
 from app.services.security.account_warming import warming_manager
-from app.core.config import settings
 
 
 async def demo_real_telegram():
@@ -49,11 +50,11 @@ async def demo_real_telegram():
         await client.connect()
 
         if not await client.is_user_authorized():
-            print(f"   ❌ Session无效,需要重新登录")
+            print("   ❌ Session无效,需要重新登录")
             return None
 
         me = await client.get_me()
-        print(f"   ✅ 登录成功!")
+        print("   ✅ 登录成功!")
         print(f"      用户名: @{me.username or 'N/A'}")
         print(f"      姓名: {me.first_name} {me.last_name or ''}")
         print(f"      ID: {me.id}")
@@ -111,7 +112,7 @@ async def demo_search_groups(client):
                     print(f"         成员数: {member_count}")
                     print(f"         ID: {chat.id}")
             else:
-                print(f"   ⚠️ 未找到相关群组")
+                print("   ⚠️ 未找到相关群组")
 
         except Exception as e:
             print(f"   ❌ 搜索失败: {e}")
@@ -179,7 +180,7 @@ async def demo_verification_flow():
     # 生成验证问题
     challenge_msg = verification_manager.get_challenge_message(test_user_id)
     if challenge_msg:
-        print(f"\n📩 系统发送验证消息:")
+        print("\n📩 系统发送验证消息:")
         for line in challenge_msg.split('\n'):
             print(f"   {line}")
 
@@ -201,7 +202,7 @@ async def demo_verification_flow():
         print(f"   验证结果: {'通过' if is_correct else '失败'}")
 
         if is_correct:
-            print(f"   🎉 验证成功!用户可以开始对话")
+            print("   🎉 验证成功!用户可以开始对话")
 
 
 async def main():
@@ -209,10 +210,10 @@ async def main():
     print("\n" + "=" * 70)
     print("🚀 Telegram OSINT 系统 - 真实演示")
     print("=" * 70)
-    print(f"\n⚙️ 配置信息:")
+    print("\n⚙️ 配置信息:")
     print(f"   Telegram API ID: {settings.tg_api_id}")
     print(f"   DeepSeek Model: {settings.deepseek_model}")
-    print(f"   Session文件: sessions/printer.session")
+    print("   Session文件: sessions/printer.session")
     print()
 
     try:

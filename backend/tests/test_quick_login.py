@@ -1,8 +1,8 @@
 import asyncio
-from contextlib import redirect_stderr, redirect_stdout
 import io
-from types import SimpleNamespace
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import quick_login

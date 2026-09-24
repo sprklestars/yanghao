@@ -7,8 +7,8 @@
 - 持久化到Redis或内存
 """
 
-from typing import Set
 import logging
+from typing import Set
 
 logger = logging.getLogger(__name__)
 

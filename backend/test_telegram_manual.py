@@ -35,7 +35,7 @@ async def test_login_and_search():
 
         # Get user info
         me = await client.get_me()
-        print(f"\n✅ Login successful!")
+        print("\n✅ Login successful!")
         print(f"   Username: @{me.username or 'N/A'}")
         print(f"   Name: {me.first_name} {me.last_name or ''}")
         print(f"   ID: {me.id}")

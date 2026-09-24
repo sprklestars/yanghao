@@ -279,6 +279,7 @@ async def humanize_with_llm(
     """Use LLM to humanize and contextualize script templates."""
 
     from openai import AsyncOpenAI
+
     from app.core.config import settings
 
     client = AsyncOpenAI(

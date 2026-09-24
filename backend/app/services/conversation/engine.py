@@ -1,5 +1,4 @@
 import logging
-import random
 from enum import Enum
 
 from openai import AsyncOpenAI

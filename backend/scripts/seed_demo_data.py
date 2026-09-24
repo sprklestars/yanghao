@@ -3,29 +3,27 @@ OSINT Platform - Demo Data Seeder
 生成演示数据用于展示系统功能
 """
 
-import asyncio
 import uuid
-from datetime import datetime, timezone, timedelta
-import random
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.models.models import (
     Account,
+    AccountHealth,
+    ActivityStatus,
     Conversation,
     ConversationState,
+    IntelligenceCategory,
     IntelligenceRecord,
     Message,
     MessageDirection,
     Persona,
     Platform,
+    ReviewStatus,
     Task,
     TaskStatus,
-    IntelligenceCategory,
-    ActivityStatus,
-    ReviewStatus,
-    AccountHealth,
 )
 
 
@@ -33,7 +31,8 @@ def create_demo_data():
     """创建演示数据"""
 
     # 使用同步引擎
-    import sys, os
+    import os
+    import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
     from app.core.config import settings
     engine = create_engine(settings.database_url_sync or "postgresql://osint:osint@localhost:5432/osint")

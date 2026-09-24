@@ -145,8 +145,10 @@ export default function AccountsPage() {
     }
   };
 
-  const getDaysSince = (createdAt: string) => {
+  const getDaysSince = (createdAt?: string | number) => {
+    if (createdAt === undefined || createdAt === null) return 0;
     const ts = typeof createdAt === 'number' ? createdAt * 1000 : new Date(createdAt).getTime();
+    if (Number.isNaN(ts)) return 0;
     return Math.floor((Date.now() - ts) / (1000 * 60 * 60 * 24));
   };
 

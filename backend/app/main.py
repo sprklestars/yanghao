@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import uuid
@@ -20,8 +19,16 @@ async def persist_message(message: dict):
     """Save a telegram_message event to the conversations/messages tables."""
     try:
         from app.models.models import (
-            Account, Conversation, ConversationState, Message, MessageDirection,
-            Platform, AccountHealth, Task, TaskStatus, IntelligenceCategory,
+            Account,
+            AccountHealth,
+            Conversation,
+            ConversationState,
+            IntelligenceCategory,
+            Message,
+            MessageDirection,
+            Platform,
+            Task,
+            TaskStatus,
         )
 
         account_name = message.get("account", "unknown")

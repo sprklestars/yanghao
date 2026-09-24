@@ -19,11 +19,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from app.core.config import settings
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
-from app.services.platform.facebook_adapter import FacebookAdapter
 from app.services.platform.base import AccountCredentials, MessageContent, PlatformName
+from app.services.platform.facebook_adapter import FacebookAdapter
 
 SESSION_NAME = "fb_default"
 CATEGORY = "currency_exchanger"

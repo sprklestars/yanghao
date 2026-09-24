@@ -12,7 +12,6 @@ from app.models.models import (
     TaskStatus,
 )
 
-
 # ── Task Schemas ──────────────────────────────────────
 
 class TaskCreate(BaseModel):

@@ -8,6 +8,7 @@ async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_o
 
 # Sync engine for Alembic and Celery (which doesn't support async)
 from sqlalchemy import create_engine
+
 sync_engine = create_engine(settings.database_url_sync, echo=settings.app_env == "development")
 sync_session_factory = sessionmaker(sync_engine, expire_on_commit=False)
 

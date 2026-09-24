@@ -10,8 +10,10 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# 注意：必须是 /lib/ 这种锚定到仓库根的写法。
+# 原来的 "lib/" 会连 frontend/src/lib/ 一起忽略，导致前端 API 客户端从未被提交。
+/lib/
+/lib64/
 parts/
 sdist/
 var/

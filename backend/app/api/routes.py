@@ -9,12 +9,12 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.models.models import Task, Conversation, Message, IntelligenceRecord, TaskStatus
+from app.models.models import Conversation, IntelligenceRecord, Task, TaskStatus
 from app.schemas.schemas import (
     ConversationResponse,
     IntelligenceListResponse,
@@ -169,7 +169,7 @@ async def list_personas():
 @router.post("/accounts/{account_id}/check-session")
 async def check_session(account_id: str):
     """Lightweight session/cookie validity check for any platform."""
-    import json, os
+    import json
     session_file = None
     platform = None
 
@@ -187,8 +187,8 @@ async def check_session(account_id: str):
 
     try:
         if platform == "telegram":
-            from app.services.platform.telegram_adapter import TelegramAdapter
             from app.core.config import settings
+            from app.services.platform.telegram_adapter import TelegramAdapter
             adapter = TelegramAdapter(settings.TELEGRAM_API_ID, settings.TELEGRAM_API_HASH, session_name=str(SESSION_DIR / account_id))
             result = await adapter.is_session_valid()
         elif platform == "facebook":
@@ -231,8 +231,8 @@ _pending_logins: dict[str, object] = {}
 @router.post("/accounts/telegram/test-connection")
 async def telegram_test_connection(body: dict):
     """Test Telegram connectivity without sending any code."""
-    import asyncio
     from telethon import TelegramClient
+
     from app.core.config import settings
 
     session_name = body.get("session_name", "").strip() or "test_connection"
@@ -270,8 +270,10 @@ async def telegram_test_connection(body: dict):
 async def telegram_send_code(body: dict):
     """Send verification code to a phone number for Telegram login."""
     import asyncio
+
     from telethon import TelegramClient
     from telethon.errors import FloodWaitError, PhoneNumberInvalidError
+
     from app.core.config import settings
 
     phone = body.get("phone", "").strip()
@@ -407,8 +409,6 @@ async def facebook_login_start(body: dict):
 @router.post("/accounts/facebook/login-complete")
 async def facebook_login_complete(body: dict):
     """Signal that user has finished logging in; save cookies and close browser."""
-    import os
-    import signal
     session_name = body.get("session_name", "fb_default").strip()
 
     proc = _fb_login_processes.get(session_name)
@@ -435,7 +435,7 @@ async def facebook_login_complete(body: dict):
 @router.post("/accounts/zalo/login")
 async def zalo_login(body: dict):
     """Login to Zalo with phone and password."""
-    from app.services.platform.base import PlatformName, AccountCredentials
+    from app.services.platform.base import AccountCredentials, PlatformName
     from app.services.platform.zalo_adapter import ZaloAdapter
 
     phone = body.get("phone", "").strip()
@@ -468,9 +468,9 @@ async def search_groups(body: dict):
     """Search Telegram groups by keyword or natural language query."""
     import traceback as tb
     try:
-        from app.services.platform.telegram_adapter import TelegramAdapter
-        from app.services.platform.base import AccountCredentials, PlatformName
         from app.core.config import settings
+        from app.services.platform.base import AccountCredentials, PlatformName
+        from app.services.platform.telegram_adapter import TelegramAdapter
 
         query = body.get("query", "").strip()
         account = body.get("account", "printer").strip()
@@ -543,9 +543,9 @@ async def search_groups(body: dict):
 @router.post("/groups/join")
 async def join_group(body: dict):
     """Join a Telegram group by ID."""
-    from app.services.platform.telegram_adapter import TelegramAdapter
-    from app.services.platform.base import AccountCredentials, PlatformName
     from app.core.config import settings
+    from app.services.platform.base import AccountCredentials, PlatformName
+    from app.services.platform.telegram_adapter import TelegramAdapter
 
     group_id = body.get("group_id", "").strip()
     account = body.get("account", "printer").strip()
@@ -572,9 +572,9 @@ async def join_group(body: dict):
 @router.post("/groups/add-by-link")
 async def add_group_by_link(body: dict):
     """Join a Telegram group by invite link or username."""
-    from app.services.platform.telegram_adapter import TelegramAdapter
-    from app.services.platform.base import AccountCredentials, PlatformName
     from app.core.config import settings
+    from app.services.platform.base import AccountCredentials, PlatformName
+    from app.services.platform.telegram_adapter import TelegramAdapter
 
     link = body.get("link", "").strip()
     account = body.get("account", "printer").strip()
@@ -722,20 +722,20 @@ async def get_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
 async def end_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
     """End a conversation and mark the target user as blocked."""
     from datetime import datetime
-    
+
     result = await db.execute(
         select(Conversation).where(Conversation.id == conv_id)
     )
     conv = result.scalar_one_or_none()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    
+
     # Mark conversation as ended
     conv.ended_at = datetime.now(datetime.timezone.utc)
     conv.state = "exit"  # Changed to exit state
-    
+
     await db.commit()
-    
+
     # Notify via WebSocket
     await _get_manager().send_to_task(str(conv.task_id), {
         "type": "conversation_ended",
@@ -743,7 +743,7 @@ async def end_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
         "target_user_id": conv.target_user_id,
         "reason": "blocked_by_operator",
     })
-    
+
     return {"status": "ended", "conversation_id": conv_id}
 
 

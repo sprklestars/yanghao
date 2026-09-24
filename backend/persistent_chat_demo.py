@@ -16,23 +16,20 @@
 """
 
 import asyncio
-import sys
+import logging
 import os
 import signal
-import time
-import logging
+import sys
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError
+
+from app.core.config import settings
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
-from app.services.security.account_warming import warming_manager
-from app.core.config import settings
-
 
 # 配置
 SESSION_NAME = "sessions/printer"
@@ -250,7 +247,8 @@ class PersistentChatBot:
                 if not is_private:
                     try:
                         chat = await event.get_chat()
-                        from telethon.tl.types import Channel, Chat as TGChat
+                        from telethon.tl.types import Channel
+                        from telethon.tl.types import Chat as TGChat
                         if isinstance(chat, Channel):
                             is_channel = getattr(chat, 'broadcast', False)
                             is_group = not is_channel
@@ -340,8 +338,9 @@ class PersistentChatBot:
             # Load context summary from DB
             context_summary = None
             try:
-                from app.core.database import async_session_factory
                 from sqlalchemy import select as sa_select
+
+                from app.core.database import async_session_factory
                 from app.models.models import Conversation
                 async with async_session_factory() as session:
                     result = await session.execute(
@@ -376,8 +375,9 @@ class PersistentChatBot:
                         reply=response,
                         state=state,
                     )
-                    from app.core.database import async_session_factory
                     from sqlalchemy import select as sa_select
+
+                    from app.core.database import async_session_factory
                     from app.models.models import Conversation
                     async with async_session_factory() as session:
                         result = await session.execute(

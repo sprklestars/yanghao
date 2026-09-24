@@ -13,7 +13,6 @@ import asyncio
 import json
 import random
 import sys
-from getpass import getpass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -118,8 +117,8 @@ async def login_facebook(session_name: str) -> bool:
     await browser.close()
     await pw.stop()
 
-    print(f"\n🚀 Next step:")
-    print(f"   python persistent_facebook_demo.py start")
+    print("\n🚀 Next step:")
+    print("   python persistent_facebook_demo.py start")
     print(f"{'='*60}\n")
     return True
 

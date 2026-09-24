@@ -358,7 +358,8 @@ class ZaloAdapter(PlatformAdapter):
         )
 
     async def is_session_valid(self) -> dict:
-        import os, time
+        import os
+        import time
         if not os.path.exists(self._cookie_file):
             return {"valid": False, "message": "Session 文件不存在，请先登录", "details": {}}
         try:

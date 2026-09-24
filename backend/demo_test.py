@@ -17,11 +17,13 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from telethon import TelegramClient
-from app.services.conversation.verification import verification_manager
-from app.services.security.account_warming import warming_manager, AccountProfile
-from app.core.config import settings
 from datetime import datetime
+
+from telethon import TelegramClient
+
+from app.core.config import settings
+from app.services.conversation.verification import verification_manager
+from app.services.security.account_warming import warming_manager
 
 
 async def demo_account_login():
@@ -49,11 +51,11 @@ async def demo_account_login():
             await client.connect()
 
             if not await client.is_user_authorized():
-                print(f"   ❌ Session无效,需要重新登录")
+                print("   ❌ Session无效,需要重新登录")
                 continue
 
             me = await client.get_me()
-            print(f"   ✅ 登录成功!")
+            print("   ✅ 登录成功!")
             print(f"      用户名: @{me.username or 'N/A'}")
             print(f"      姓名: {me.first_name} {me.last_name or ''}")
             print(f"      ID: {me.id}")
@@ -88,11 +90,11 @@ async def demo_verification():
     # 第一步: 发送验证问题
     challenge_msg = verification_manager.get_challenge_message(test_user_id)
     if challenge_msg:
-        print(f"\n 系统发送验证消息:")
+        print("\n 系统发送验证消息:")
         print(f"   {challenge_msg}")
 
     # 第二步: 用户回答错误
-    print(f"\n❌ 用户回答: '999' (错误答案)")
+    print("\n❌ 用户回答: '999' (错误答案)")
     is_correct = verification_manager.check_answer(test_user_id, "999")
     print(f"   验证结果: {'通过' if is_correct else '失败'}")
 
@@ -106,10 +108,10 @@ async def demo_verification():
         print(f"   验证结果: {'通过' if is_correct else '失败'}")
 
         if is_correct:
-            print(f"    验证成功!用户可以开始对话")
+            print("    验证成功!用户可以开始对话")
 
     # 第四步: 再次验证(应该直接通过)
-    print(f"\n🔄 同一用户再次发起对话...")
+    print("\n🔄 同一用户再次发起对话...")
     is_verified = verification_manager.is_verified(test_user_id)
     print(f"   验证状态: {'已验证,跳过验证步骤' if is_verified else '需要重新验证'}")
 
