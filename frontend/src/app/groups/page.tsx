@@ -31,6 +31,7 @@ export default function GroupsPage() {
       const data = await fetchAPI('/groups/search', {
         method: 'POST',
         body: JSON.stringify({ query, account, use_ai: useAI }),
+        timeout: 60000,
       });
       setResults(data.results || []);
       setKeywordsUsed(data.keywords_used || []);
@@ -46,6 +47,7 @@ export default function GroupsPage() {
       const data = await fetchAPI('/groups/join', {
         method: 'POST',
         body: JSON.stringify({ group_id: group.group_id, account }),
+        timeout: 60000,
       });
       setJoinStatus((prev) => ({ ...prev, [group.group_id]: data.status === 'joined' ? 'joined' : 'failed' }));
     } catch {
@@ -61,6 +63,7 @@ export default function GroupsPage() {
       const data = await fetchAPI('/groups/add-by-link', {
         method: 'POST',
         body: JSON.stringify({ link: linkInput, account }),
+        timeout: 60000,
       });
       if (data.status === 'joined') {
         setLinkInput('');

@@ -9,7 +9,7 @@ from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.contacts import AddContactRequest
-from telethon.tl.functions.messages import SearchRequest
+from telethon.tl.functions.contacts import SearchRequest as ContactsSearchRequest
 from telethon.tl.types import (
     InputPeerChannel,
     InputUser,
@@ -39,10 +39,11 @@ class MediaGroupBuffer:
 
 
 class TelegramAdapter(PlatformAdapter):
-    def __init__(self, api_id: int, api_hash: str, session_name: str = "osint_tg"):
+    def __init__(self, api_id: int, api_hash: str, session_name: str = "osint_tg", proxy: tuple | None = None):
         self._api_id = api_id
         self._api_hash = api_hash
         self._session_name = session_name
+        self._proxy = proxy
         self._client: TelegramClient | None = None
         self._daily_actions = 0
         self._error_count = 0
@@ -59,11 +60,18 @@ class TelegramAdapter(PlatformAdapter):
             device_model="Samsung Galaxy S24",
             system_version="Android 14",
             app_version="10.12.0",
+            proxy=self._proxy,
         )
         phone = credentials.credentials.get("phone")
         password = credentials.credentials.get("password")
         try:
-            await self._client.start(phone=phone, password=password)
+            if phone:
+                await self._client.start(phone=phone, password=password)
+            else:
+                await self._client.connect()
+                if not await self._client.is_user_authorized():
+                    logger.error("Session %s is not authorized", self._session_name)
+                    return False
             logger.info("Telegram authenticated as %s", credentials.username)
             return True
         except Exception as e:
@@ -78,26 +86,21 @@ class TelegramAdapter(PlatformAdapter):
         assert self._client is not None
         results: list[GroupInfo] = []
         try:
-            response = await self._client(SearchRequest(
+            response = await self._client(ContactsSearchRequest(
                 q=query,
-                filter=None,
-                min_date=None,
-                max_date=None,
-                offset_id=0,
-                add_offset=0,
                 limit=limit,
-                max_id=0,
-                min_id=0,
-                hash=0,
             ))
             for chat in (response.chats or []):
-                results.append(GroupInfo(
-                    group_id=str(chat.id),
-                    name=getattr(chat, "title", ""),
-                    member_count=getattr(chat, "participants_count", 0),
-                    description=getattr(chat, "about", ""),
-                    platform=PlatformName.TELEGRAM,
-                ))
+                # Only include groups/channels, skip private chats
+                if hasattr(chat, 'title'):
+                    results.append(GroupInfo(
+                        group_id=str(chat.id),
+                        name=getattr(chat, "title", ""),
+                        member_count=getattr(chat, "participants_count", 0) or 0,
+                        description=getattr(chat, "about", "") or "",
+                        platform=PlatformName.TELEGRAM,
+                    ))
+            logger.info("search_groups '%s': found %d results", query, len(results))
         except FloodWaitError as e:
             logger.warning("FloodWait %ds on search_groups", e.seconds)
             await asyncio.sleep(e.seconds)
@@ -422,3 +425,28 @@ class TelegramAdapter(PlatformAdapter):
             daily_actions=self._daily_actions,
             error_rate=error_rate,
         )
+
+    async def is_session_valid(self) -> dict:
+        import os
+        session_file = f"sessions/{self._session_name}.session"
+        if not os.path.exists(session_file):
+            return {"valid": False, "message": "Session 文件不存在", "details": {}}
+        try:
+            client = TelegramClient(
+                self._session_name, self._api_id, self._api_hash,
+                device_model="Samsung Galaxy S24", system_version="Android 14",
+                app_version="10.12.0", proxy=self._proxy,
+            )
+            await client.connect()
+            authorized = await client.is_user_authorized()
+            username = None
+            if authorized:
+                me = await client.get_me()
+                username = getattr(me, "username", None) or getattr(me, "first_name", "")
+            await client.disconnect()
+            if authorized:
+                return {"valid": True, "message": f"Session 有效 (用户: {username})", "details": {"username": username}}
+            else:
+                return {"valid": False, "message": "Session 已过期，请重新登录", "details": {}}
+        except Exception as e:
+            return {"valid": False, "message": f"检测失败: {e}", "details": {"error": str(e)}}

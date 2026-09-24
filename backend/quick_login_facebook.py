@@ -11,6 +11,7 @@ Usage:
 
 import asyncio
 import json
+import random
 import sys
 from getpass import getpass
 from pathlib import Path
@@ -23,6 +24,7 @@ SESSION_DIR.mkdir(exist_ok=True)
 
 async def login_facebook(session_name: str) -> bool:
     from playwright.async_api import async_playwright
+    from playwright_stealth import stealth_async
 
     cookie_file = SESSION_DIR / f"{session_name}_cookies.json"
 
@@ -37,12 +39,37 @@ async def login_facebook(session_name: str) -> bool:
     print("5. Cookies will be saved for headless automation\n")
 
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=False)
+    browser = await pw.chromium.launch(
+        headless=False,
+        args=[
+            '--disable-blink-features=AutomationControlled',
+            '--disable-infobars',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-dev-shm-usage',
+        ],
+    )
     context = await browser.new_context(
-        viewport={"width": 1280, "height": 900},
+        viewport={"width": random.choice([1366, 1440, 1536, 1920]),
+                  "height": random.choice([768, 900, 864, 1080])},
         locale="vi-VN",
         timezone_id="Asia/Ho_Chi_Minh",
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+        color_scheme="light",
+        extra_http_headers={
+            "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+            "sec-ch-ua": '"Chromium";v="125", "Not.A/Brand";v="24", "Google Chrome";v="125"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        },
     )
+
+    page = await context.new_page()
+    await stealth_async(page)
 
     # Load existing cookies if available
     if cookie_file.exists():
@@ -54,7 +81,6 @@ async def login_facebook(session_name: str) -> bool:
         except Exception as e:
             print(f"⚠️ Could not load cookies: {e}")
 
-    page = await context.new_page()
     await page.goto("https://www.facebook.com/", wait_until="domcontentloaded")
 
     input("\n✅ Press Enter after you have logged in successfully...")

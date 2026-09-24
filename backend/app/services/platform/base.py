@@ -94,3 +94,9 @@ class PlatformAdapter(ABC):
     @abstractmethod
     def get_health_status(self) -> AccountHealthStatus:
         ...
+
+    @abstractmethod
+    async def is_session_valid(self) -> dict:
+        """Lightweight check whether stored session/cookies are still valid.
+        Returns {"valid": bool, "message": str, "details": dict}."""
+        ...

@@ -38,14 +38,42 @@ from app.core.config import settings
 SESSION_NAME = "sessions/printer"
 PROXY = ('http', '127.0.0.1', 7890)
 
-PERSONA_CONFIG = {
-    "name": "Nguyen Van A",
-    "age": 28,
-    "occupation": "Freelance graphic designer",
-    "location": "Ho Chi Minh City",
-    "backstory": "在胡志明市做自由设计师3年，经常需要换汇和找外包合作。",
-    "tone": "casual, friendly, slightly naive",
+PERSONA_PRESETS = {
+    "designer": {
+        "name": "Nguyen Van A",
+        "age": 28,
+        "occupation": "Freelance graphic designer",
+        "location": "Ho Chi Minh City",
+        "backstory": "在胡志明市做自由设计师3年，经常需要换汇和找外包合作。",
+        "tone": "casual, friendly, slightly naive",
+    },
+    "trader": {
+        "name": "Tran Minh Duc",
+        "age": 32,
+        "occupation": "Crypto trader",
+        "location": "Hanoi",
+        "backstory": "做了5年加密货币交易，熟悉OTC场外交易和各种换汇渠道。",
+        "tone": "confident, knowledgeable, direct",
+    },
+    "student": {
+        "name": "Le Thi Mai",
+        "age": 22,
+        "occupation": "University student",
+        "location": "Da Nang",
+        "backstory": "大四学生，学国际贸易，想找兼职和实习机会。",
+        "tone": "curious, polite, eager to learn",
+    },
+    "business": {
+        "name": "Pham Hoang Nam",
+        "age": 35,
+        "occupation": "Import-export business owner",
+        "location": "Ho Chi Minh City",
+        "backstory": "经营进出口贸易公司8年，需要频繁跨境支付和换汇。",
+        "tone": "professional, experienced, trustworthy",
+    },
 }
+
+PERSONA_CONFIG = PERSONA_PRESETS["designer"]
 
 CATEGORY = "currency_exchanger"
 
@@ -130,6 +158,25 @@ class PersistentChatBot:
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 100
         self.ws_bridge = WSBridge()
+        self.reply_policy = {"private": True, "groups": False, "channels": False, "bots": False}
+        self.paused = False
+        self._load_meta_config()
+
+    def _load_meta_config(self):
+        import json
+        session_name = SESSION_NAME.split("/")[-1]
+        meta_file = Path(SESSION_NAME).parent / f"{session_name}_meta.json"
+        if meta_file.exists():
+            try:
+                with open(meta_file) as f:
+                    meta = json.load(f)
+                self.reply_policy = meta.get("reply_policy", self.reply_policy)
+                self.paused = meta.get("paused", False)
+                persona_key = meta.get("persona")
+                if persona_key and persona_key in PERSONA_PRESETS:
+                    self.persona_config = PERSONA_PRESETS[persona_key]
+            except Exception:
+                pass
 
     async def connect(self):
         """连接到Telegram,带重试机制"""
@@ -171,10 +218,59 @@ class PersistentChatBot:
 
         @self.client.on(events.NewMessage(incoming=True))
         async def handle_new_message(event):
-            """处理新消息"""
+            """处理新消息 — 根据 reply_policy 过滤"""
             try:
-                user_id = str(event.sender_id)
+                self._load_meta_config()
+
+                if self.paused:
+                    logger.debug("⏸ 账号已暂停回复，忽略消息")
+                    # Still push inbound message to frontend for monitoring
+                    sender = await event.get_sender()
+                    user_name = getattr(sender, 'first_name', None) or "Unknown"
+                    message_text = event.message.text or ""
+                    await self.ws_bridge.send({
+                        "type": "telegram_message",
+                        "direction": "inbound",
+                        "account": SESSION_NAME.split("/")[-1],
+                        "sender_id": str(event.sender_id),
+                        "sender_name": user_name,
+                        "content": message_text,
+                        "timestamp": datetime.now().isoformat(),
+                    })
+                    return
+
+                policy = self.reply_policy
+
                 sender = await event.get_sender()
+                is_bot = getattr(sender, 'bot', False)
+                is_private = event.is_private
+
+                is_group = False
+                is_channel = False
+                if not is_private:
+                    try:
+                        chat = await event.get_chat()
+                        from telethon.tl.types import Channel, Chat as TGChat
+                        if isinstance(chat, Channel):
+                            is_channel = getattr(chat, 'broadcast', False)
+                            is_group = not is_channel
+                        elif isinstance(chat, TGChat):
+                            is_group = True
+                    except Exception:
+                        is_group = True
+
+                logger.info(f"📨 收到消息: private={is_private} group={is_group} channel={is_channel} bot={is_bot} policy={policy}")
+
+                if is_bot and not policy.get("bots", False):
+                    return
+                if is_private and not policy.get("private", True):
+                    return
+                if is_group and not policy.get("groups", False):
+                    return
+                if is_channel and not policy.get("channels", False):
+                    return
+
+                user_id = str(event.sender_id)
                 user_name = getattr(sender, 'first_name', None) or "Unknown"
                 message_text = event.message.text or ""
 
@@ -202,8 +298,8 @@ class PersistentChatBot:
                     message_text, user_id, CATEGORY
                 )
 
-                # 模拟打字延迟
-                typing_delay = min(len(response) * 0.05, 3.0)
+                # 模拟打字延迟（缩短）
+                typing_delay = min(len(response) * 0.02, 1.0)
                 logger.info(f"⏳ 打字延迟: {typing_delay:.1f}秒")
                 await asyncio.sleep(typing_delay)
 
@@ -271,30 +367,33 @@ class PersistentChatBot:
                 context_summary=context_summary,
             )
 
-            # Update context summary
-            try:
-                updated_summary = await self.engine.update_context_summary(
-                    existing_summary=context_summary,
-                    incoming_message=message,
-                    reply=response,
-                    state=state,
-                )
-                from app.core.database import async_session_factory
-                from sqlalchemy import select as sa_select
-                from app.models.models import Conversation
-                async with async_session_factory() as session:
-                    result = await session.execute(
-                        sa_select(Conversation).where(
-                            Conversation.target_user_id == target_user_id,
-                            Conversation.ended_at.is_(None),
-                        )
+            # Update context summary in background (don't block reply)
+            async def _update_summary():
+                try:
+                    updated_summary = await self.engine.update_context_summary(
+                        existing_summary=context_summary,
+                        incoming_message=message,
+                        reply=response,
+                        state=state,
                     )
-                    conv = result.scalar_one_or_none()
-                    if conv:
-                        conv.context_summary = updated_summary
-                        await session.commit()
-            except Exception as e:
-                logger.debug("Could not save context_summary: %s", e)
+                    from app.core.database import async_session_factory
+                    from sqlalchemy import select as sa_select
+                    from app.models.models import Conversation
+                    async with async_session_factory() as session:
+                        result = await session.execute(
+                            sa_select(Conversation).where(
+                                Conversation.target_user_id == target_user_id,
+                                Conversation.ended_at.is_(None),
+                            )
+                        )
+                        conv = result.scalar_one_or_none()
+                        if conv:
+                            conv.context_summary = updated_summary
+                            await session.commit()
+                except Exception as e:
+                    logger.debug("Could not save context_summary: %s", e)
+
+            asyncio.create_task(_update_summary())
 
             return response, state
 

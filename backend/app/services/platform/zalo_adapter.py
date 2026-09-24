@@ -357,6 +357,33 @@ class ZaloAdapter(PlatformAdapter):
             last_error="Cookie expired" if is_cookie_expired else None,
         )
 
+    async def is_session_valid(self) -> dict:
+        import os, time
+        if not os.path.exists(self._cookie_file):
+            return {"valid": False, "message": "Session 文件不存在，请先登录", "details": {}}
+        try:
+            mtime = os.path.getmtime(self._cookie_file)
+            hours_since_login = (time.time() - mtime) / 3600
+            days_left = max(0, (48 - hours_since_login) / 24)
+            if hours_since_login > 48:
+                return {
+                    "valid": False,
+                    "message": f"Cookie 已过期 ({round(hours_since_login, 1)}小时前保存，Zalo Cookie 有效期约48小时)",
+                    "details": {"hours_since_login": round(hours_since_login, 1)},
+                }
+            msg = f"Cookie 有效 ({round(hours_since_login, 1)}小时前保存)"
+            if days_left < 1:
+                msg += " ⚠️ 即将过期，建议尽快重新登录"
+            else:
+                msg += f", 预计剩余 {round(days_left, 1)} 天"
+            return {
+                "valid": True,
+                "message": msg,
+                "details": {"hours_since_login": round(hours_since_login, 1), "days_left": round(days_left, 1)},
+            }
+        except Exception as e:
+            return {"valid": False, "message": f"检测失败: {e}", "details": {"error": str(e)}}
+
     def _generate_imei(self) -> str:
         """Generate a realistic IMEI for Zalo device identification."""
         import hashlib
