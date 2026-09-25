@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -16,8 +17,9 @@ from app.core.database import async_session_factory
 
 logger = logging.getLogger(__name__)
 
-# 前端可能用 localhost 或 127.0.0.1 打开，两个来源都要放行
-ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+# 本机前端可能落在任意端口上：3000 被占用时 Next.js 会自动退到 3001，
+# 所以按"本机来源"放行，而不是把端口写死（写死过一次就踩了 3001 的坑）。
+LOCAL_ORIGIN_REGEX = r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 
 async def persist_message(message: dict):
@@ -202,7 +204,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=LOCAL_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -221,7 +223,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     """
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     origin = request.headers.get("origin")
-    headers = {"Access-Control-Allow-Origin": origin} if origin in ALLOWED_ORIGINS else None
+    headers = (
+        {"Access-Control-Allow-Origin": origin}
+        if origin and re.match(LOCAL_ORIGIN_REGEX, origin)
+        else None
+    )
     return JSONResponse(
         status_code=500,
         content={"detail": f"{type(exc).__name__}: {exc}"},
