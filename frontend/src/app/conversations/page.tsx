@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { fetchAPI, type Conversation, DEMO_CONVERSATIONS, wsClient } from '@/lib/api';
+import { fetchAPI, type Conversation, wsClient } from '@/lib/api';
 
 interface LiveMessage {
   id: string;
@@ -17,7 +17,8 @@ export default function ConversationsPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<Conversation | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [demoMode, setDemoMode] = useState(false);
+  // 只有真的连不上后端才设置；没有对话记录是正常状态
+  const [backendError, setBackendError] = useState('');
   const [blockedUsers, setBlockedUsers] = useState<Set<string>>(new Set());
   const [liveMessages, setLiveMessages] = useState<LiveMessage[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -30,16 +31,11 @@ export default function ConversationsPage() {
   async function loadConversations() {
     try {
       const data = await fetchAPI<Conversation[]>('/conversations');
-      if (data && data.length > 0) {
-        setConversations(data.filter((c) => !blockedUsers.has(c.target_user_id)));
-        setDemoMode(false);
-      } else {
-        setConversations(DEMO_CONVERSATIONS.filter((c) => !blockedUsers.has(c.target_user_id)));
-        setDemoMode(true);
-      }
-    } catch {
-      setConversations(DEMO_CONVERSATIONS.filter((c) => !blockedUsers.has(c.target_user_id)));
-      setDemoMode(true);
+      setConversations((data || []).filter((c) => !blockedUsers.has(c.target_user_id)));
+      setBackendError('');
+    } catch (e: any) {
+      setConversations([]);
+      setBackendError(e?.message || '后端不可达');
     }
     setLoaded(true);
   }
@@ -92,9 +88,9 @@ export default function ConversationsPage() {
 
   return (
     <div className="flex flex-col h-[calc(100vh-3rem)]">
-      {demoMode && (
-        <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2 text-sm text-yellow-800 mb-2 rounded">
-          💡 <strong>演示模式:</strong> 数据库中暂无对话记录，显示模拟数据。启动持久化监听服务后将显示真实对话。
+      {backendError && (
+        <div className="bg-rose-50 border border-rose-200 px-4 py-2 text-sm text-rose-800 mb-2 rounded">
+          ⚠️ <strong>后端不可达:</strong> {backendError}
         </div>
       )}
 

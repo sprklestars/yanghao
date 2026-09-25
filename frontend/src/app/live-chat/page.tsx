@@ -13,42 +13,10 @@ interface ChatMessage {
   senderName?: string;
 }
 
-const DEMO_MESSAGES: ChatMessage[] = [
-  {
-    id: '1',
-    sender: 'user',
-    content: 'Xin chào! Tôi muốn đổi tiền USD sang VND.',
-    timestamp: new Date(Date.now() - 300000),
-    status: 'verified',
-  },
-  {
-    id: '2',
-    sender: 'bot',
-    content: 'Chào bạn! 👋 Vui lòng giải đáp câu hỏi xác minh trước:\n\n87 + 13 = ?',
-    timestamp: new Date(Date.now() - 295000),
-    status: 'sent',
-  },
-  {
-    id: '3',
-    sender: 'user',
-    content: '100',
-    timestamp: new Date(Date.now() - 290000),
-    status: 'verified',
-  },
-  {
-    id: '4',
-    sender: 'bot',
-    content: '✅ Xác minh thành công! Cảm ơn bạn đã kiên nhẫn.\n\nVề việc đổi tiền, hiện tại tỷ giá USD/VND khoảng 24,500. Bạn muốn đổi số tiền bao nhiêu?',
-    timestamp: new Date(Date.now() - 285000),
-    status: 'verified',
-  },
-];
-
 export default function LiveChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isConnected, setIsConnected] = useState(false);
-  const [demoMode, setDemoMode] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
 
@@ -64,7 +32,6 @@ export default function LiveChatPage() {
         await wsClient.connect();
         if (!mounted) return;
         setIsConnected(true);
-        setDemoMode(false);
 
         wsClient.on('telegram_message', (msg) => {
           const newMsg: ChatMessage = {
@@ -81,8 +48,6 @@ export default function LiveChatPage() {
       } catch {
         if (!mounted) return;
         setIsConnected(false);
-        setDemoMode(true);
-        setMessages(DEMO_MESSAGES);
       }
     };
 
@@ -93,22 +58,6 @@ export default function LiveChatPage() {
       wsClient.disconnect();
     };
   }, []);
-
-  // Fallback demo simulation when not connected
-  useEffect(() => {
-    if (!demoMode) return;
-
-    const interval = setInterval(() => {
-      const demoIncoming: ChatMessage[] = [
-        { id: `demo-${Date.now()}`, sender: 'user', content: 'Tỷ giá hôm nay thế nào?', timestamp: new Date(), status: 'verified' },
-        { id: `demo-${Date.now()}-b`, sender: 'bot', content: 'Hiện tại USD/VND là 25,500. Bạn cần đổi bao nhiêu? 💱', timestamp: new Date(), status: 'sent' },
-      ];
-      const pick = demoIncoming[Math.floor(Math.random() * demoIncoming.length)];
-      setMessages((prev) => [...prev, pick]);
-    }, Math.random() * 20000 + 10000);
-
-    return () => clearInterval(interval);
-  }, [demoMode]);
 
   const handleSendMessage = () => {
     if (!inputValue.trim()) return;
@@ -123,24 +72,6 @@ export default function LiveChatPage() {
 
     setMessages((prev) => [...prev, newMessage]);
     setInputValue('');
-
-    if (demoMode) {
-      setTimeout(() => {
-        const responses = [
-          'Vâng, chúng tôi có hỗ trợ đổi EUR/VND với tỷ giá cạnh tranh. 💱',
-          'Văn phòng mở cửa từ 9:00 - 18:00, Thứ 2 - Thứ 7. 🕘',
-          'Bạn có thể thanh toán bằng chuyển khoản hoặc tiền mặt. ✅',
-        ];
-        const botResponse: ChatMessage = {
-          id: `msg-${Date.now()}-bot`,
-          sender: 'bot',
-          content: responses[Math.floor(Math.random() * responses.length)],
-          timestamp: new Date(),
-          status: 'sent',
-        };
-        setMessages((prev) => [...prev, botResponse]);
-      }, 2000);
-    }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -156,11 +87,9 @@ export default function LiveChatPage() {
       <div className="bg-white rounded-lg shadow-sm p-4 mb-4">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-xl font-bold">💬 Live Chat {demoMode ? '(Demo)' : '(Real-time)'}</h2>
+            <h2 className="text-xl font-bold">💬 实时对话</h2>
             <p className="text-sm text-gray-600 mt-1">
-              {demoMode
-                ? 'Simulated conversation — start persistent_chat_demo.py for real data'
-                : 'Receiving live Telegram messages via WebSocket'}
+              通过 WebSocket 接收后端广播的实时消息
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -174,9 +103,9 @@ export default function LiveChatPage() {
             </span>
           </div>
         </div>
-        {demoMode && (
-          <div className="mt-2 px-3 py-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-800">
-            ⚠️ Demo Mode: Showing simulated messages. Connect backend + persistent_chat_demo.py for live chat.
+        {!isConnected && (
+          <div className="mt-2 px-3 py-2 bg-rose-50 border border-rose-200 rounded text-xs text-rose-800">
+            ⚠️ 未连接到后端 WebSocket（ws://localhost:8000/ws）。请确认 API 已启动。
           </div>
         )}
       </div>
@@ -191,7 +120,7 @@ export default function LiveChatPage() {
             <div className="text-center">
               <p className="text-lg">No messages yet</p>
               <p className="text-sm mt-2">
-                {demoMode ? 'Demo messages will appear shortly...' : 'Waiting for Telegram messages...'}
+                等待后端推送消息...
               </p>
             </div>
           </div>
@@ -244,7 +173,7 @@ export default function LiveChatPage() {
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder={demoMode ? "Type your message... (Press Enter to send)" : "Manual reply (will be sent via Telegram)..."}
+            placeholder="输入内容（当前仅记录在本地页面，未接发送通道）"
             className="flex-1 px-3 py-2 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
             rows={2}
           />

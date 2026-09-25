@@ -1,16 +1,14 @@
 'use client';
 
 import { useState } from 'react';
-import { fetchAPI, type IntelligenceRecord, DEMO_INTELLIGENCE } from '@/lib/api';
-
-// 自动检测: 优先使用真实API，失败时降级到模拟数据
-const DEMO_MODE = false;
+import { fetchAPI, type IntelligenceRecord } from '@/lib/api';
 
 export default function IntelligencePage() {
   const [records, setRecords] = useState<IntelligenceRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [loaded, setLoaded] = useState(false);
-  const [demoFallback, setDemoFallback] = useState(false);
+  // 只有真的连不上后端才设置；没有情报记录是正常状态
+  const [backendError, setBackendError] = useState('');
   const [filters, setFilters] = useState({ category: '', platform: '' });
 
   async function loadRecords() {
@@ -22,22 +20,21 @@ export default function IntelligencePage() {
       setRecords(data.items);
       setTotal(data.total);
       setLoaded(true);
-      setDemoFallback(false);
-    } catch (error) {
+      setBackendError('');
+    } catch (error: any) {
       console.error('Failed to load intelligence:', error);
-      setRecords(DEMO_INTELLIGENCE);
-      setTotal(DEMO_INTELLIGENCE.length);
+      setRecords([]);
+      setTotal(0);
       setLoaded(true);
-      setDemoFallback(true);
+      setBackendError(error?.message || '后端不可达');
     }
   }
 
   return (
     <div className="flex flex-col h-[calc(100vh-3rem)]">
-      {/* Fallback banner when API is unreachable */}
-      {demoFallback && (
-        <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2 text-sm text-yellow-800 mb-4 rounded">
-          💡 <strong>演示模式:</strong> 后端不可达，显示模拟数据。启动后端后将显示真实情报。
+      {backendError && (
+        <div className="bg-rose-50 border-b border-rose-200 px-4 py-2 text-sm text-rose-800 mb-4 rounded">
+          ⚠️ <strong>后端不可达:</strong> {backendError}
         </div>
       )}
 

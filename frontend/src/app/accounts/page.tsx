@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { type Account, type ReplyPolicy, type PersonaPreset, DEMO_ACCOUNTS, accountAPI, serviceAPI, type ServiceStatus, wsClient, fetchAPI } from '@/lib/api';
+import { type Account, type ReplyPolicy, type PersonaPreset, accountAPI, serviceAPI, type ServiceStatus, wsClient, fetchAPI } from '@/lib/api';
 
 const PLATFORM_CONFIG: Record<string, { icon: string; color: string; label: string }> = {
   telegram: { icon: '✈️', color: 'from-sky-500 to-blue-600', label: 'Telegram' },
@@ -24,7 +24,8 @@ export default function AccountsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [services, setServices] = useState<ServiceStatus[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [demoMode, setDemoMode] = useState(false);
+  // 后端不可达时才设置；账号列表为空是正常状态，不再当成"演示模式"
+  const [backendError, setBackendError] = useState('');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [logView, setLogView] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
@@ -62,21 +63,17 @@ export default function AccountsPage() {
         accountAPI.list(),
         serviceAPI.status(),
       ]);
-      if (accData && accData.length > 0) {
-        setAccounts(accData);
-        setDemoMode(false);
-      } else {
-        setAccounts(DEMO_ACCOUNTS);
-        setDemoMode(true);
-      }
+      setAccounts(accData || []);
       setServices(svcData || []);
+      setBackendError('');
       try {
         const pData = await accountAPI.listPersonas();
         if (pData?.personas) setPersonaPresets(pData.personas);
       } catch { /* ignore */ }
-    } catch {
-      setAccounts(DEMO_ACCOUNTS);
-      setDemoMode(true);
+    } catch (e: any) {
+      setAccounts([]);
+      setServices([]);
+      setBackendError(e?.message || '后端不可达');
     }
     setLoaded(true);
   };
@@ -320,10 +317,12 @@ export default function AccountsPage() {
     <div className="flex flex-col h-[calc(100vh-3rem)]">
       {/* Status banner */}
       <div className={`mb-6 px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 ${
-        demoMode ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+        backendError ? 'bg-rose-50 text-rose-800 border border-rose-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
       }`}>
-        <span>{demoMode ? '⚠️' : '✅'}</span>
-        {demoMode ? '演示模式 — 后端不可达，显示模拟数据' : '实时模式 — 已连接后端服务'}
+        <span>{backendError ? '⚠️' : '✅'}</span>
+        {backendError
+          ? `后端不可达 — 请确认 API 已在 8000 端口启动（${backendError}）`
+          : '已连接后端服务'}
       </div>
 
       {/* Header */}

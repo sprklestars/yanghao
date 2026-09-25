@@ -3,47 +3,11 @@
 import { useEffect, useState } from 'react';
 import { fetchAPI, wsClient, type Task } from '@/lib/api';
 
-// 模拟数据 (仅在后端不可达时作为降级)
-const MOCK_TASKS: Task[] = [
-  {
-    id: 'task-001',
-    name: '河内自由职业者调研',
-    platform: 'telegram',
-    category: 'freelancer',
-    keywords: ['thiết kế website', 'lập trình viên', 'freelancer'],
-    target_region: 'Hanoi',
-    status: 'completed',
-    created_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 'task-002',
-    name: '换汇服务情报收集',
-    platform: 'telegram',
-    category: 'currency_exchanger',
-    keywords: ['đổi tiền', 'chuyển tiền', 'tỷ giá'],
-    target_region: 'Ho Chi Minh City',
-    status: 'running',
-    created_at: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 'task-003',
-    name: '私人侦探服务调查',
-    platform: 'telegram',
-    category: 'private_investigator',
-    keywords: ['thám tử', 'điều tra', 'theo dõi'],
-    target_region: undefined,
-    status: 'pending',
-    created_at: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-];
-
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [demoFallback, setDemoFallback] = useState(false);
+  // 只有真的连不上后端才设置；没有任务是正常状态
+  const [backendError, setBackendError] = useState('');
   const [form, setForm] = useState({
     name: '',
     platform: 'telegram',
@@ -67,14 +31,14 @@ export default function TasksPage() {
   async function loadTasks() {
     try {
       const data = await fetchAPI('/tasks');
-      setTasks(data);
+      setTasks(data || []);
       setLoaded(true);
-      setDemoFallback(false);
-    } catch (error) {
+      setBackendError('');
+    } catch (error: any) {
       console.error('Failed to load tasks:', error);
-      setTasks(MOCK_TASKS);
+      setTasks([]);
       setLoaded(true);
-      setDemoFallback(true);
+      setBackendError(error?.message || '后端不可达');
     }
   }
 
@@ -111,10 +75,10 @@ export default function TasksPage() {
     <div>
       <h2 className="text-2xl font-bold mb-4">📋 任务管理</h2>
 
-      {demoFallback && (
-        <div className="bg-yellow-50 border-l-4 border-yellow-500 p-3 mb-4 rounded">
-          <p className="text-sm text-yellow-700">
-            💡 <strong>演示模式:</strong> 后端不可达，显示模拟数据。
+      {backendError && (
+        <div className="bg-rose-50 border-l-4 border-rose-500 p-3 mb-4 rounded">
+          <p className="text-sm text-rose-700">
+            ⚠️ <strong>后端不可达:</strong> {backendError}
           </p>
         </div>
       )}
