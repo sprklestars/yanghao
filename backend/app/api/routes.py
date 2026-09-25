@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.core.session_paths import SESSION_DIR, ensure_session_dir
 from app.models.models import (
     Conversation,
     ConversationState,
@@ -40,7 +41,6 @@ def _get_manager():
     return manager
 
 
-SESSION_DIR = Path(__file__).resolve().parent.parent.parent / "sessions"
 TG_PROXY = ("http", "127.0.0.1", 7890)
 
 
@@ -297,6 +297,8 @@ async def telegram_test_connection(body: dict):
 
     session_name = body.get("session_name", "").strip() or "test_connection"
     session_path = str(SESSION_DIR / session_name)
+    # Telethon 在构造时就要写 .session 文件，目录不存在会抛 sqlite3 错误。
+    ensure_session_dir(session_path)
     client = TelegramClient(
         session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, proxy=TG_PROXY
     )
@@ -353,6 +355,7 @@ async def telegram_send_code(body: dict):
         phone = "+" + phone
 
     session_path = str(SESSION_DIR / session_name)
+    ensure_session_dir(session_path)
     client = TelegramClient(
         session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, proxy=TG_PROXY
     )

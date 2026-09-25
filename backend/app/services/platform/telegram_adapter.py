@@ -11,6 +11,7 @@ from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.contacts import AddContactRequest
 from telethon.tl.functions.contacts import SearchRequest as ContactsSearchRequest
 
+from app.core.session_paths import ensure_session_dir
 from app.services.platform.base import (
     AccountCredentials,
     AccountHealthStatus,
@@ -52,6 +53,9 @@ class TelegramAdapter(PlatformAdapter):
         self._flush_task: asyncio.Task | None = None
 
     async def authenticate(self, credentials: AccountCredentials) -> bool:
+        # Telethon 构造时就创建 SQLite session 文件，目录不存在会直接抛
+        # sqlite3.OperationalError: unable to open database file。
+        ensure_session_dir(self._session_name)
         self._client = TelegramClient(
             self._session_name,
             self._api_id,
@@ -457,6 +461,7 @@ class TelegramAdapter(PlatformAdapter):
         if not os.path.exists(session_file):
             return {"valid": False, "message": "Session 文件不存在", "details": {}}
         try:
+            ensure_session_dir(self._session_name)
             client = TelegramClient(
                 self._session_name,
                 self._api_id,

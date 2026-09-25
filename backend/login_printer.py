@@ -8,6 +8,7 @@ import asyncio
 from telethon import TelegramClient
 
 from app.core.config import settings
+from app.core.session_paths import ensure_session_dir
 
 SESSION_NAME = "sessions/printer"
 
@@ -19,6 +20,8 @@ async def main():
     print()
 
     # Create client with proxy
+    # Telethon 构造时就写 .session 文件，目录不存在会抛 sqlite3 错误。
+    ensure_session_dir(SESSION_NAME)
     try:
         client = TelegramClient(
             SESSION_NAME,

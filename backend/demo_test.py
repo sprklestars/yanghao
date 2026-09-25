@@ -22,6 +22,7 @@ from datetime import datetime
 from telethon import TelegramClient
 
 from app.core.config import settings
+from app.core.session_paths import ensure_session_dir
 from app.services.conversation.verification import verification_manager
 from app.services.security.account_warming import warming_manager
 
@@ -36,6 +37,7 @@ async def demo_account_login():
 
     for session_name in session_files:
         session_path = f"sessions/{session_name}"
+        ensure_session_dir(session_path)
         print(f"\n📱 尝试加载账号: {session_name}")
 
         try:

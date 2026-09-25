@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from telethon import TelegramClient
 
 from app.core.config import settings
+from app.core.session_paths import ensure_session_dir
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
 from app.services.security.account_warming import warming_manager
@@ -34,6 +35,7 @@ async def demo_real_telegram():
     print("=" * 70)
 
     session_name = "sessions/printer"
+    ensure_session_dir(session_name)
 
     print(f"\n📱 加载账号: {session_name}")
 

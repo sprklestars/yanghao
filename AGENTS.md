@@ -298,7 +298,11 @@ mypy .
    - 演示常量：`DEMO_ACCOUNTS` / `DEMO_CONVERSATIONS` / `DEMO_INTELLIGENCE`
 
 2. ~~**`settings.TELEGRAM_API_ID` 不存在**~~ ✅ **已修复**：改用 `settings.tg_api_id / tg_api_hash`，并补上 `proxy=TG_PROXY`；`TelegramAdapter` 新增 `_session_file()`，绝对路径与纯会话名都能正确解析，不再拼出 `sessions/C:\...` 这种无效路径。
-   仍待处理：登录类端点（`telegram/test-connection`、`send-code` 等）**没有像 `quick_login.py` 那样先建 `backend/sessions/` 目录**，目录不存在时 Telethon 会报 `sqlite3.OperationalError: unable to open database file`。
+   ~~**登录类端点没有先建 `backend/sessions/` 目录**~~ ✅ **已修复**：新增 `app/core/session_paths.py`，
+   `ensure_session_dir()` 统一在构造 `TelegramClient` 之前创建会话目录（`routes.py` 的
+   `telegram/test-connection` / `send-code`、`TelegramAdapter.authenticate` / `is_session_valid`，
+   以及 `login_printer.py` / `persistent_chat_demo.py` / `live_chat_demo.py` / `real_demo.py` / `demo_test.py`）。
+   此前目录不存在时 Telethon 会在构造瞬间报 `sqlite3.OperationalError: unable to open database file`。
 
 3. **回复逻辑有三份实现**
    `engine.ConversationEngine`（被 `tasks.py` 用）、`persistent_chat_demo.py` 的 `generate_response()`、以及 `routes.py` 里一段内联 LLM 调用（约 473-560 行）。三者行为并不完全一致，改对话流程时要一起看。

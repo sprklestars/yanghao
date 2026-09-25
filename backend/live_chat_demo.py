@@ -25,6 +25,7 @@ from datetime import datetime
 from telethon import TelegramClient, events
 
 from app.core.config import settings
+from app.core.session_paths import ensure_session_dir
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
 from app.services.security.account_warming import warming_manager
@@ -191,6 +192,7 @@ async def main():
     )
 
     # 创建Telegram客户端(带代理)
+    ensure_session_dir(SESSION_NAME)
     client = TelegramClient(
         SESSION_NAME,
         settings.tg_api_id,

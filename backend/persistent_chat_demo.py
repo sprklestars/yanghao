@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from telethon import TelegramClient, events
 
 from app.core.config import settings
+from app.core.session_paths import ensure_session_dir
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
 
@@ -185,6 +186,7 @@ class PersistentChatBot:
                 logger.info(f"🔌 正在连接Telegram (尝试 {self.reconnect_attempts + 1})...")
 
                 # 创建客户端(使用代理)
+                ensure_session_dir(SESSION_NAME)
                 self.client = TelegramClient(
                     SESSION_NAME, settings.tg_api_id, settings.tg_api_hash, proxy=PROXY
                 )
