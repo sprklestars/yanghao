@@ -27,11 +27,13 @@
 |----|----|
 | 仓库根 | 当前目录（`yanghao-1` 工作树） |
 | 远程 | `https://github.com/sprklestars/yanghao.git`（origin，分支 `master`） |
-| HEAD | **detached HEAD**（`git rev-parse --abbrev-ref HEAD` 返回 `HEAD`），提交 `fb0a365` |
+| 当前分支 | `setup-and-fixes`（从 `fb0a365` 拉出），`master` 仍停在 `fb0a365` 未动 |
 | 运行平台 | Windows + PowerShell（脚本却是 bash 风格，见 §11.10） |
-| 未提交改动 | 已跟踪文件无改动（本次新增了本文件 `AGENTS.md`） |
+| 未提交改动 | 运行 `git status` 查看；**本机运行手册见 [RUNBOOK.md](RUNBOOK.md)** |
 
 最近提交脉络（自下向上）：初版骨架 → TG 养号/防封 → 实时对话演示与持久化 → 前后端真实数据链路 → 消息持久化 + 上下文记忆 → 账号添加流程 + Zalo 登录 → 移除硬编码凭证 → TG 群组管理 + AI 搜索 → 全平台 Session 检测 + FB 反检测。
+
+**2026-09-25 这批改动（在 `setup-and-fixes` 分支）**：修复依赖安装与打包配置、修复 4 个真实 bug（CORS 白名单、会话结束端点的三种错误、TG 会话检测属性名）、**删除前端全部演示数据与降级逻辑**（现在空列表就是空列表，只有真连不上才报"后端不可达"）、ruff 从 360 项清零、单测从 14 个补到 53 个。
 
 ---
 
@@ -230,6 +232,8 @@ Telegram ↔ persistent_chat_demo.py ↔ WS ↔ FastAPI(manager) ↔ WS ↔ Next
 
 ## 9. 运行方式
 
+> 本机（Windows）的完整启动流程、路径速查与排错表见 **[RUNBOOK.md](RUNBOOK.md)**；下面是通用说明。
+
 ### 基础设施
 
 ```bash
@@ -284,10 +288,8 @@ mypy .
 
 ## 11. 已知问题 / 坑（动手前先看这一节）
 
-1. **前端 API 客户端文件缺失（最影响交付的问题）**
-   所有页面都 `import ... from '@/lib/api'`，但 `frontend/src/lib/` **根本不存在**。原因是 `.gitignore` 第 13 行的 Python 产物规则 `lib/` 把 `frontend/src/lib/api.ts` 一并忽略了（`git check-ignore -v frontend/src/lib/api.ts` 可复现），所以它从未被提交，当前检出也拿不到 → `npm run dev` 会直接编译失败。
-   修法：把 `.gitignore` 里的 `lib/` 改成 `/lib/`（或补一条 `!frontend/src/lib/`），然后**重建**该文件。
-   需要提供的导出面（由各页面 import 反推）：
+1. ~~**前端 API 客户端文件缺失**~~ ✅ **已修复**：`.gitignore` 的 `lib/` 已锚定为 `/lib/`，`frontend/src/lib/api.ts` 已重建并提交。
+   各页面用到的导出面（后续改动请保持兼容）：
    - 函数 `fetchAPI(path, init)`，base 指向 `http://localhost:8000/api/v1`
    - 对象 `wsClient`（`connect` / `disconnect` / `on`），连 `ws://localhost:8000/ws`
    - `accountAPI`：`list` / `delete` / `updateDisplayName` / `updateReplyPolicy` / `setPaused` / `setPersona` / `listPersonas` / `checkSession` / `telegramTestConnection` / `telegramSendCode` / `telegramVerifyCode` / `facebookLoginStart` / `facebookLoginComplete`（各自对应 §7 的账号端点）
@@ -295,8 +297,8 @@ mypy .
    - 类型：`Account` / `ReplyPolicy` / `PersonaPreset` / `ServiceStatus` / `Task` / `Conversation` / `IntelligenceRecord`
    - 演示常量：`DEMO_ACCOUNTS` / `DEMO_CONVERSATIONS` / `DEMO_INTELLIGENCE`
 
-2. **`settings.TELEGRAM_API_ID` 不存在**
-   `routes.py:192` 用了 `settings.TELEGRAM_API_ID / TELEGRAM_API_HASH`，但 `Settings` 只定义了 `tg_api_id` / `tg_api_hash` → `AttributeError`，被 except 兜住后 `/accounts/{id}/check-session` 对 TG 账号恒返回「不通过」。同一个调用还把**绝对路径**当 `session_name` 传进去，而 `is_session_valid()` 内部又拼成 `f"sessions/{name}.session"`，路径二次拼接也必然找不到文件。要修就两处一起修。
+2. ~~**`settings.TELEGRAM_API_ID` 不存在**~~ ✅ **已修复**：改用 `settings.tg_api_id / tg_api_hash`，并补上 `proxy=TG_PROXY`；`TelegramAdapter` 新增 `_session_file()`，绝对路径与纯会话名都能正确解析，不再拼出 `sessions/C:\...` 这种无效路径。
+   仍待处理：登录类端点（`telegram/test-connection`、`send-code` 等）**没有像 `quick_login.py` 那样先建 `backend/sessions/` 目录**，目录不存在时 Telethon 会报 `sqlite3.OperationalError: unable to open database file`。
 
 3. **回复逻辑有三份实现**
    `engine.ConversationEngine`（被 `tasks.py` 用）、`persistent_chat_demo.py` 的 `generate_response()`、以及 `routes.py` 里一段内联 LLM 调用（约 473-560 行）。三者行为并不完全一致，改对话流程时要一起看。
@@ -319,7 +321,10 @@ mypy .
 
 12. **有若干模块写好了但没接进主流程**（全仓库搜索无任何 import）：`RateLimiter` / `AccountHealthMonitor`（`security/rate_limiter.py`）、`StrategyEngine`（`conversation/strategy_engine.py`）、`ScriptLibrary`（`conversation/script_library.py`）。目前真正拦截操作的是 `account_warming.warming_manager`，另外打字/冷却延迟是直接写在适配器里的。所以文档里描述的平台级限流、A/B 话术、策略优先级，实际都还没有生效——评估「系统现在能做到什么」时别被文档带跑。
 
-13. **拉黑链路不完整**：`BlockListManager` 是进程内集合，且只在 `persistent_chat_demo.py` 里被判读（`is_blocked(user_id)`）；`routes.py` 的 `POST /conversations/{id}/end` 并不写入 blocklist。另外该端点用 `conv.state = "exit"` 直接赋小写字符串，而 PG 枚举存的是大写成员名（`EXIT`），commit 时很可能报枚举值非法——动这里建议改成 `ConversationState.EXIT`。
+13. **拉黑链路不完整**：`BlockListManager` 是进程内集合，且只在 `persistent_chat_demo.py` 里被判读（`is_blocked(user_id)`）；`routes.py` 的 `POST /conversations/{id}/end` 并不写入 blocklist（**且因为它是独立进程，写内存也传不到守护进程那边，要真生效得落 Redis/DB/文件**）。
+    ~~该端点用 `conv.state = "exit"` 赋小写字符串~~ ✅ **已修复**（改用 `ConversationState.EXIT`），同时修掉了同一处 `datetime.now(datetime.timezone.utc)` 这种取不到时区、必然 `AttributeError` 的写法——也就是说这个端点在修复前每次调用都会 500。
+
+14. **前端演示数据已全部移除**（2026-09-25）：`DEMO_ACCOUNTS` / `DEMO_CONVERSATIONS` / `DEMO_INTELLIGENCE` / `MOCK_TASKS` / `DEMO_MESSAGES` 及 live-chat 的随机假消息定时器都已删除。因此现在"列表为空"会如实显示空状态，而 `backend/scripts/seed_demo_data.py` 仍会写入演示数据——要干净环境就别跑它。
 
 ---
 
@@ -327,6 +332,7 @@ mypy .
 
 | 文档 | 内容 | 时效 |
 |------|------|------|
+| [RUNBOOK.md](RUNBOOK.md) | **本机运行手册**：运行逻辑、三窗口启动、验证清单、数据操作、排错表、路径速查 | 最新（2026-09-25，按本机实测） |
 | [TECHNICAL_DOC.md](TECHNICAL_DOC.md) | 最完整的技术说明：架构图、状态机、Prompt 工程、上下文窗口分析、平台适配器、养号表、数据模型、API、部署、待优化项 | 最权威（v0.1.0，2026-09-23） |
 | [architecture-design.md](architecture-design.md) | 设计稿：选型理由、三平台 API 限制对比、情报 Schema、风险评估、应急预案、路线图、成本 | 设计意图，见 §11.11 |
 | [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) | 面向非技术的产品说明：能做什么、怎么运作、后台模块、当前进度 | 适合快速理解价值 |
@@ -353,4 +359,4 @@ mypy .
 - **改话术 / 对话风格**：真正生效的是 `engine.py` 的 `SYSTEM_PROMPT_TEMPLATE` 与 `STAGE_HINTS`；`script_library.py` 虽是话术库但尚未接入（§11.12）。
 - **改限额 / 风控**：生效的阈值在 `account_warming.py`；`rate_limiter.py` 里那套平台级限额目前没被调用（§11.12），只改它不会有任何效果。
 - **敏感文件纪律**：会话、Cookie、`.env`、日志一律不入库；涉及真实账号的操作只在用户明确授权下进行。
-- **提交规范**：仓库使用 `feat:` / `fix:` / `docs:` / `security:` 前缀的中文提交信息；新建分支默认用 `codex/` 前缀。
+- **提交规范**：仓库使用 `feat:` / `fix:` / `docs:` / `security:` 前缀的中文提交信息；新建分支默认用 `codex/` 前缀。当前工作分支是 `setup-and-fixes`（用户指定命名）。

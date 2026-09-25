@@ -72,6 +72,8 @@ desktop.ini
 frontend/node_modules/
 frontend/.next/
 frontend/out/
+# TypeScript 增量编译缓存（tsc --noEmit / next build 会生成）
+*.tsbuildinfo
 
 # Backend build
 backend/build/
