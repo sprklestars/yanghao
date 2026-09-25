@@ -9,6 +9,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
+from app.api.routes import router as api_router
 from app.core.config import settings
 from app.core.database import async_session_factory
 
@@ -51,7 +52,11 @@ async def persist_message(message: dict):
         account_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"account-{account_name}")
         task_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"task-auto-{platform_str}")
 
-        platform_enum = {"telegram": Platform.TELEGRAM, "facebook": Platform.FACEBOOK, "zalo": Platform.ZALO}.get(platform_str, Platform.TELEGRAM)
+        platform_enum = {
+            "telegram": Platform.TELEGRAM,
+            "facebook": Platform.FACEBOOK,
+            "zalo": Platform.ZALO,
+        }.get(platform_str, Platform.TELEGRAM)
 
         async with async_session_factory() as session:
             # Ensure Account exists
@@ -105,7 +110,9 @@ async def persist_message(message: dict):
                 session.add(conv)
                 await session.flush()
 
-            msg_direction = MessageDirection.INBOUND if direction == "inbound" else MessageDirection.OUTBOUND
+            msg_direction = (
+                MessageDirection.INBOUND if direction == "inbound" else MessageDirection.OUTBOUND
+            )
             msg = Message(
                 id=uuid.uuid4(),
                 conversation_id=conv.id,
@@ -130,7 +137,11 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket, channel: str = "global"):
         await websocket.accept()
         self.active_connections[channel].append(websocket)
-        logger.info("WebSocket connected on channel %s (total: %d)", channel, len(self.active_connections[channel]))
+        logger.info(
+            "WebSocket connected on channel %s (total: %d)",
+            channel,
+            len(self.active_connections[channel]),
+        )
 
     def disconnect(self, websocket: WebSocket, channel: str = "global"):
         if websocket in self.active_connections[channel]:
@@ -187,13 +198,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    # 前端用 localhost:3000 或 127.0.0.1:3000 打开都要能连上；
+    # 只放行其中一个时，另一个来源的请求会被浏览器拦掉，页面显示"后端不可达"
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-from app.api.routes import router as api_router
 
 app.include_router(api_router, prefix="/api/v1")
 

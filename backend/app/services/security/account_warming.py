@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 class AccountAge(Enum):
     """Account age categories for warming strategy."""
+
     NEW = "new"  # 0-7 days
     WARMING = "warming"  # 8-30 days
     STABLE = "stable"  # 31-90 days
@@ -133,13 +134,15 @@ class AccountProfile:
     @property
     def is_fully_configured(self) -> bool:
         """Check if all required settings are configured."""
-        return all([
-            self.interface_localized,
-            self.contacts_sync_disabled,
-            self.two_factor_enabled,
-            self.auto_delete_enabled,
-            self.privacy_settings_complete,
-        ])
+        return all(
+            [
+                self.interface_localized,
+                self.contacts_sync_disabled,
+                self.two_factor_enabled,
+                self.auto_delete_enabled,
+                self.privacy_settings_complete,
+            ]
+        )
 
     @property
     def ip_consistent(self) -> bool:
@@ -206,7 +209,9 @@ class AccountWarmingManager:
             current_ip_region=ip_region,
         )
         self._profiles[account_id] = profile
-        logger.info("Created warming profile for account %s (age: %d days)", account_id, profile.age_days)
+        logger.info(
+            "Created warming profile for account %s (age: %d days)", account_id, profile.age_days
+        )
         return profile
 
     def get_profile(self, account_id: str) -> AccountProfile | None:
@@ -225,7 +230,8 @@ class AccountWarmingManager:
         if profile.registration_ip_region and old_region != new_region:
             if profile.age_days < profile.config.ip_consistency_days:
                 logger.warning(
-                    "IP region changed for account %s: %s -> %s (account age: %d days, should be consistent for %d days)",
+                    "IP region changed for account %s: %s -> %s "
+                    "(account age: %d days, should be consistent for %d days)",
                     account_id,
                     old_region,
                     new_region,
@@ -240,7 +246,7 @@ class AccountWarmingManager:
         is_stranger: bool = False,
     ) -> tuple[bool, str]:
         """Check if operation is allowed under warming strategy.
-        
+
         Returns: (allowed, reason)
         """
         profile = self._profiles.get(account_id)
@@ -270,24 +276,38 @@ class AccountWarmingManager:
         # Check operation-specific limits
         if operation == "join_group":
             if not profile.can_join_group():
-                return False, f"Daily group join limit reached ({profile.config.max_groups_per_day})"
+                return (
+                    False,
+                    f"Daily group join limit reached ({profile.config.max_groups_per_day})",
+                )
 
             # Check observe time if recently joined a group
             if profile.last_group_join_time and profile.config.require_delay_after_join:
                 elapsed = (datetime.now() - profile.last_group_join_time).total_seconds() / 60
                 if elapsed < profile.config.min_observe_time_minutes:
                     remaining = profile.config.min_observe_time_minutes - elapsed
-                    return False, f"Must observe {remaining:.0f} more minutes before next group join"
+                    return (
+                        False,
+                        f"Must observe {remaining:.0f} more minutes before next group join",
+                    )
 
         elif operation == "send_message":
             if not profile.can_send_message(is_stranger):
                 limit_type = "stranger messages" if is_stranger else "messages"
-                limit = profile.config.max_stranger_messages_per_day if is_stranger else profile.config.max_messages_per_day
+                limit = (
+                    profile.config.max_stranger_messages_per_day
+                    if is_stranger
+                    else profile.config.max_messages_per_day
+                )
                 return False, f"Daily {limit_type} limit reached ({limit})"
 
         elif operation == "friend_request":
             if not profile.can_send_friend_request():
-                return False, f"Daily friend request limit reached ({profile.config.max_friend_requests_per_day})"
+                return (
+                    False,
+                    f"Daily friend request limit reached "
+                    f"({profile.config.max_friend_requests_per_day})",
+                )
 
         return True, "Operation allowed"
 

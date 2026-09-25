@@ -88,6 +88,7 @@ class RateLimiter:
     def is_active_hours(self, tz_offset: int = 7) -> bool:
         """Check if current time is within Vietnam active hours (8:00-23:00 UTC+7)."""
         import datetime
+
         utc_now = datetime.datetime.now(datetime.timezone.utc)
         vn_now = utc_now + datetime.timedelta(hours=tz_offset)
         hour = vn_now.hour
@@ -105,9 +106,15 @@ class AccountHealthMonitor:
         self._stats: dict[str, dict] = {}
 
     def record_action(self, account_id: str, success: bool) -> None:
-        stats = self._stats.setdefault(account_id, {
-            "total": 0, "errors": 0, "consecutive_failures": 0, "daily_count": 0,
-        })
+        stats = self._stats.setdefault(
+            account_id,
+            {
+                "total": 0,
+                "errors": 0,
+                "consecutive_failures": 0,
+                "daily_count": 0,
+            },
+        )
         stats["total"] += 1
         stats["daily_count"] += 1
         if success:

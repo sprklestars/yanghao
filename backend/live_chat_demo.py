@@ -33,7 +33,7 @@ from app.services.security.account_warming import warming_manager
 SESSION_NAME = "sessions/printer"
 
 # 代理配置(如果需要)
-PROXY = ('http', '127.0.0.1', 7890)  # (类型, 主机, 端口)
+PROXY = ("http", "127.0.0.1", 7890)  # (类型, 主机, 端口)
 
 # Persona配置
 PERSONA_CONFIG = {
@@ -58,13 +58,13 @@ async def handle_new_message(event):
         return
 
     user_id = str(sender.id)
-    user_name = getattr(sender, 'first_name', 'Unknown')
+    user_name = getattr(sender, "first_name", "Unknown")
     message_text = event.raw_text
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"📨 收到消息 from @{user_name} (ID: {user_id})")
     print(f"   内容: {message_text}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     # 检查养号限制
     allowed, reason = warming_manager.check_and_enforce_limits(
@@ -99,7 +99,10 @@ async def handle_new_message(event):
         is_correct = verification_manager.check_answer(user_id, message_text)
 
         if is_correct:
-            reply = "✅ Xác minh thành công! Bây giờ chúng ta có thể bắt đầu trò chuyện. 😊\n\nChào bạn! Mình là Nguyễn, rất vui được làm quen!"
+            reply = (
+                "✅ Xác minh thành công! Bây giờ chúng ta có thể bắt đầu trò chuyện. 😊\n\n"
+                "Chào bạn! Mình là Nguyễn, rất vui được làm quen!"
+            )
             print("\n✅ 验证通过!")
             print(f"🤖 回复: {reply}")
             await event.reply(reply)
@@ -225,6 +228,7 @@ async def main():
     except Exception as e:
         print(f"\n❌ 错误: {e}")
         import traceback
+
         traceback.print_exc()
         print("\n💡 提示: 如果连接失败,请检查:")
         print("   1. 代理是否运行(127.0.0.1:7890)")

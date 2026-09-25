@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class VerificationChallenge:
     """Represents an arithmetic challenge for user verification."""
+
     question: str
     answer: int
     created_at: datetime = field(default_factory=datetime.now)
@@ -119,16 +120,14 @@ class VerificationManager:
     @staticmethod
     def _normalize_digits(text: str) -> str:
         """Convert full-width digits to normal digits."""
-        return text.translate(str.maketrans(
-            "０１２３４５６７８９",
-            "0123456789"
-        ))
+        return text.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
 
     def cleanup_expired(self):
         """Remove expired challenges to prevent memory leak."""
         now = datetime.now()
         expired = [
-            uid for uid, challenge in self._challenges.items()
+            uid
+            for uid, challenge in self._challenges.items()
             if now > challenge.created_at + timedelta(seconds=challenge.ttl_seconds)
         ]
         for uid in expired:

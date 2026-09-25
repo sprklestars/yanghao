@@ -73,6 +73,7 @@ async def demo_real_telegram():
     except Exception as e:
         print(f"   ❌ 错误: {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -91,23 +92,25 @@ async def demo_search_groups(client):
         try:
             from telethon.tl.functions.messages import SearchRequest
 
-            results = await client(SearchRequest(
-                q=query,
-                filter=None,
-                min_date=None,
-                max_date=None,
-                offset_id=0,
-                add_offset=0,
-                limit=3,
-                max_id=0,
-                min_id=0,
-                hash=0,
-            ))
+            results = await client(
+                SearchRequest(
+                    q=query,
+                    filter=None,
+                    min_date=None,
+                    max_date=None,
+                    offset_id=0,
+                    add_offset=0,
+                    limit=3,
+                    max_id=0,
+                    min_id=0,
+                    hash=0,
+                )
+            )
 
             if results.chats:
                 print(f"   ✅ 找到 {len(results.chats)} 个群组:")
                 for i, chat in enumerate(results.chats[:3], 1):
-                    member_count = getattr(chat, 'participants_count', 'N/A')
+                    member_count = getattr(chat, "participants_count", "N/A")
                     print(f"      {i}. {chat.title}")
                     print(f"         成员数: {member_count}")
                     print(f"         ID: {chat.id}")
@@ -181,18 +184,19 @@ async def demo_verification_flow():
     challenge_msg = verification_manager.get_challenge_message(test_user_id)
     if challenge_msg:
         print("\n📩 系统发送验证消息:")
-        for line in challenge_msg.split('\n'):
+        for line in challenge_msg.split("\n"):
             print(f"   {line}")
 
     # 模拟用户回答
     import re
-    match = re.search(r'(\d+)\s*([+\-])\s*(\d+)', challenge_msg)
+
+    match = re.search(r"(\d+)\s*([+\-])\s*(\d+)", challenge_msg)
     if match:
         num1 = int(match.group(1))
         operator = match.group(2)
         num2 = int(match.group(3))
 
-        if operator == '+':
+        if operator == "+":
             correct_answer = str(num1 + num2)
         else:
             correct_answer = str(num1 - num2)
@@ -251,6 +255,7 @@ async def main():
     except Exception as e:
         print(f"\n❌ 演示出错: {e}")
         import traceback
+
         traceback.print_exc()
 
 

@@ -49,13 +49,26 @@ Safety rules:
 """
 
 STAGE_HINTS = {
-    ConvState.VERIFICATION: "The user needs to pass a simple arithmetic verification. Wait for their answer and check if it's correct.",
+    ConvState.VERIFICATION: (
+        "The user needs to pass a simple arithmetic verification. "
+        "Wait for their answer and check if it's correct."
+    ),
     ConvState.GREETING: "Start with a friendly greeting. Be casual and warm. Keep it short.",
-    ConvState.PROBING: "Ask natural questions related to {category}. Show genuine curiosity. Don't be pushy.",
-    ConvState.EXTRACTION: "The person seems interested. Ask for more details: contact info, pricing, website, specific services. Be polite.",
-    ConvState.PIVOT: "The current topic isn't yielding results. Shift to a related angle naturally.",
+    ConvState.PROBING: (
+        "Ask natural questions related to {category}. Show genuine curiosity. Don't be pushy."
+    ),
+    ConvState.EXTRACTION: (
+        "The person seems interested. Ask for more details: contact info, "
+        "pricing, website, specific services. Be polite."
+    ),
+    ConvState.PIVOT: (
+        "The current topic isn't yielding results. Shift to a related angle naturally."
+    ),
     ConvState.EXIT: "Wrap up politely. Thank them and say you'll follow up later.",
-    ConvState.COOLDOWN: "The person seems wary. Apologize if needed, say goodbye gracefully. Do NOT continue probing.",
+    ConvState.COOLDOWN: (
+        "The person seems wary. Apologize if needed, say goodbye gracefully. "
+        "Do NOT continue probing."
+    ),
 }
 
 
@@ -90,7 +103,9 @@ class ConversationEngine:
                     reply = "✅ Xác minh thành công! Bây giờ chúng ta có thể bắt đầu trò chuyện."
                     return reply, ConvState.GREETING
                 else:
-                    reply = "❌ Câu trả lời không đúng. Vui lòng thử lại hoặc liên hệ quản trị viên."
+                    reply = (
+                        "❌ Câu trả lời không đúng. Vui lòng thử lại hoặc liên hệ quản trị viên."
+                    )
                     return reply, ConvState.COOLDOWN
 
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -155,9 +170,19 @@ class ConversationEngine:
 
         if current == ConvState.PROBING:
             business_signals = [
-                "giá", "price", "chi phí", "dịch vụ", "service",
-                "liên hệ", "contact", "zalo", "phone", "sdt",
-                "website", "fanpage", "telegram",
+                "giá",
+                "price",
+                "chi phí",
+                "dịch vụ",
+                "service",
+                "liên hệ",
+                "contact",
+                "zalo",
+                "phone",
+                "sdt",
+                "website",
+                "fanpage",
+                "telegram",
             ]
             if any(sig in lower for sig in business_signals):
                 return ConvState.EXTRACTION
@@ -196,9 +221,12 @@ class ConversationEngine:
     ) -> str:
         """Generate an updated context summary after each exchange."""
         prompt = (
-            "You are maintaining a memory profile of a person you're chatting with for OSINT purposes.\n"
-            "Given the existing summary (if any) and the latest message exchange, produce an updated concise summary.\n"
-            "Focus on: key facts learned, topics discussed, trust level, next steps, language preference.\n"
+            "You are maintaining a memory profile of a person you're chatting with "
+            "for OSINT purposes.\n"
+            "Given the existing summary (if any) and the latest message exchange, "
+            "produce an updated concise summary.\n"
+            "Focus on: key facts learned, topics discussed, trust level, next steps, "
+            "language preference.\n"
             "Keep it under 200 words. Write in the same language as the conversation.\n\n"
             f"Existing summary: {existing_summary or 'None yet'}\n"
             f"Latest exchange:\n  Them: {incoming_message}\n  You: {reply}\n"

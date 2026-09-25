@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class MediaGroupBuffer:
     """Buffer for aggregating media group messages."""
+
     items: list[dict] = field(default_factory=list)
     last_update: datetime = field(default_factory=datetime.now)
     target_id: str = ""
@@ -34,7 +36,9 @@ class MediaGroupBuffer:
 
 
 class TelegramAdapter(PlatformAdapter):
-    def __init__(self, api_id: int, api_hash: str, session_name: str = "osint_tg", proxy: tuple | None = None):
+    def __init__(
+        self, api_id: int, api_hash: str, session_name: str = "osint_tg", proxy: tuple | None = None
+    ):
         self._api_id = api_id
         self._api_hash = api_hash
         self._session_name = session_name
@@ -81,20 +85,24 @@ class TelegramAdapter(PlatformAdapter):
         assert self._client is not None
         results: list[GroupInfo] = []
         try:
-            response = await self._client(ContactsSearchRequest(
-                q=query,
-                limit=limit,
-            ))
-            for chat in (response.chats or []):
+            response = await self._client(
+                ContactsSearchRequest(
+                    q=query,
+                    limit=limit,
+                )
+            )
+            for chat in response.chats or []:
                 # Only include groups/channels, skip private chats
-                if hasattr(chat, 'title'):
-                    results.append(GroupInfo(
-                        group_id=str(chat.id),
-                        name=getattr(chat, "title", ""),
-                        member_count=getattr(chat, "participants_count", 0) or 0,
-                        description=getattr(chat, "about", "") or "",
-                        platform=PlatformName.TELEGRAM,
-                    ))
+                if hasattr(chat, "title"):
+                    results.append(
+                        GroupInfo(
+                            group_id=str(chat.id),
+                            name=getattr(chat, "title", ""),
+                            member_count=getattr(chat, "participants_count", 0) or 0,
+                            description=getattr(chat, "about", "") or "",
+                            platform=PlatformName.TELEGRAM,
+                        )
+                    )
             logger.info("search_groups '%s': found %d results", query, len(results))
         except FloodWaitError as e:
             logger.warning("FloodWait %ds on search_groups", e.seconds)
@@ -158,12 +166,14 @@ class TelegramAdapter(PlatformAdapter):
 
         try:
             entity = await self._client.get_entity(int(user_id))
-            await self._client(AddContactRequest(
-                id=entity.id,
-                first_name=getattr(entity, "first_name", ""),
-                last_name=getattr(entity, "last_name", "") or "",
-                phone=getattr(entity, "phone", "") or "",
-            ))
+            await self._client(
+                AddContactRequest(
+                    id=entity.id,
+                    first_name=getattr(entity, "first_name", ""),
+                    last_name=getattr(entity, "last_name", "") or "",
+                    phone=getattr(entity, "phone", "") or "",
+                )
+            )
 
             # Record the operation
             warming_manager.record_operation(
@@ -358,14 +368,16 @@ class TelegramAdapter(PlatformAdapter):
         async def handler(event):
             try:
                 sender = await event.get_sender()
-                await callback({
-                    "sender_id": str(sender.id) if sender else None,
-                    "sender_name": getattr(sender, "first_name", "") if sender else None,
-                    "text": event.raw_text,
-                    "chat_id": str(event.chat_id),
-                    "message_id": event.id,
-                    "timestamp": event.date.isoformat(),
-                })
+                await callback(
+                    {
+                        "sender_id": str(sender.id) if sender else None,
+                        "sender_name": getattr(sender, "first_name", "") if sender else None,
+                        "text": event.raw_text,
+                        "chat_id": str(event.chat_id),
+                        "message_id": event.id,
+                        "timestamp": event.date.isoformat(),
+                    }
+                )
             except Exception as e:
                 logger.error("listen_messages callback error: %s", e)
 
@@ -377,7 +389,9 @@ class TelegramAdapter(PlatformAdapter):
             entity = await self._client.get_entity(int(user_id))
             return UserProfile(
                 user_id=str(entity.id),
-                display_name=f"{getattr(entity, 'first_name', '')} {getattr(entity, 'last_name', '') or ''}".strip(),
+                display_name=(
+                    f"{getattr(entity, 'first_name', '')} {getattr(entity, 'last_name', '') or ''}"
+                ).strip(),
                 username=getattr(entity, "username", None),
                 bio=getattr(entity, "about", None),
                 is_online=getattr(entity, "status", None) is not None,
@@ -393,12 +407,16 @@ class TelegramAdapter(PlatformAdapter):
             entity = await self._client.get_entity(int(group_id))
             participants = await self._client.get_participants(entity, limit=limit)
             for p in participants:
-                members.append(UserProfile(
-                    user_id=str(p.id),
-                    display_name=f"{getattr(p, 'first_name', '')} {getattr(p, 'last_name', '') or ''}".strip(),
-                    username=getattr(p, "username", None),
-                    bio=getattr(p, "about", None),
-                ))
+                members.append(
+                    UserProfile(
+                        user_id=str(p.id),
+                        display_name=(
+                            f"{getattr(p, 'first_name', '')} {getattr(p, 'last_name', '') or ''}"
+                        ).strip(),
+                        username=getattr(p, "username", None),
+                        bio=getattr(p, "about", None),
+                    )
+                )
         except FloodWaitError as e:
             logger.warning("FloodWait %ds on get_group_members", e.seconds)
             await asyncio.sleep(e.seconds)
@@ -421,16 +439,32 @@ class TelegramAdapter(PlatformAdapter):
             error_rate=error_rate,
         )
 
+    def _session_file(self) -> str:
+        """返回 Telethon 实际使用的 .session 文件路径。
+
+        Telethon 会在 session_name 之后追加 ".session"，而调用方有两种传法：
+        routes.py 传的是绝对路径（backend/sessions/xxx），脚本里传的是纯会话名。
+        这里分别处理，避免拼出 "sessions/C:\\...\\printer.session" 这种无效路径，
+        让会话检测永远误报"Session 文件不存在"。
+        """
+        name = self._session_name
+        if not name.endswith(".session"):
+            name = f"{name}.session"
+        return name if os.path.isabs(name) else os.path.join("sessions", name)
+
     async def is_session_valid(self) -> dict:
-        import os
-        session_file = f"sessions/{self._session_name}.session"
+        session_file = self._session_file()
         if not os.path.exists(session_file):
             return {"valid": False, "message": "Session 文件不存在", "details": {}}
         try:
             client = TelegramClient(
-                self._session_name, self._api_id, self._api_hash,
-                device_model="Samsung Galaxy S24", system_version="Android 14",
-                app_version="10.12.0", proxy=self._proxy,
+                self._session_name,
+                self._api_id,
+                self._api_hash,
+                device_model="Samsung Galaxy S24",
+                system_version="Android 14",
+                app_version="10.12.0",
+                proxy=self._proxy,
             )
             await client.connect()
             authorized = await client.is_user_authorized()
@@ -440,7 +474,11 @@ class TelegramAdapter(PlatformAdapter):
                 username = getattr(me, "username", None) or getattr(me, "first_name", "")
             await client.disconnect()
             if authorized:
-                return {"valid": True, "message": f"Session 有效 (用户: {username})", "details": {"username": username}}
+                return {
+                    "valid": True,
+                    "message": f"Session 有效 (用户: {username})",
+                    "details": {"username": username},
+                }
             else:
                 return {"valid": False, "message": "Session 已过期，请重新登录", "details": {}}
         except Exception as e:

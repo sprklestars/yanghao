@@ -68,7 +68,7 @@ def run_task(self, task_id: str):
             result = db.execute(
                 select(Account)
                 .where(Account.platform == task.platform)
-                .where(Account.is_active == True)
+                .where(Account.is_active)
                 .limit(1)
             )
             account = result.scalar_one_or_none()
@@ -94,6 +94,7 @@ def run_task(self, task_id: str):
 
                 # Run async authenticate in sync context
                 import asyncio
+
                 loop = asyncio.new_event_loop()
                 authenticated = loop.run_until_complete(adapter.authenticate(credentials))
                 loop.close()
@@ -124,10 +125,14 @@ def run_task(self, task_id: str):
 
                             # Get group members
                             loop = asyncio.new_event_loop()
-                            members = loop.run_until_complete(adapter.get_group_members(group.group_id, limit=20))
+                            members = loop.run_until_complete(
+                                adapter.get_group_members(group.group_id, limit=20)
+                            )
                             loop.close()
 
-                            logger.info("Retrieved %d members from group %s", len(members), group.group_id)
+                            logger.info(
+                                "Retrieved %d members from group %s", len(members), group.group_id
+                            )
 
                             # 6. Start conversations with selected members
                             for member in members[:5]:  # Limit to 5 members per group
@@ -140,7 +145,11 @@ def run_task(self, task_id: str):
                                     target_display_name=member.display_name,
                                 )
                                 if conv_id:
-                                    logger.info("Started conversation %s with %s", conv_id, member.display_name)
+                                    logger.info(
+                                        "Started conversation %s with %s",
+                                        conv_id,
+                                        member.display_name,
+                                    )
 
                 loop = asyncio.new_event_loop()
                 loop.run_until_complete(adapter.disconnect())
@@ -190,33 +199,42 @@ def _start_conversation_sync(
 
         # Send initial greeting
         engine = ConversationEngine()
-        persona_config = account.persona.persona_config if account.persona else {
-            "name": "User",
-            "age": 28,
-            "occupation": "freelancer",
-            "location": "Ho Chi Minh City",
-            "backstory": "Freelance designer looking for opportunities",
-            "tone": "casual, friendly",
-        }
+        persona_config = (
+            account.persona.persona_config
+            if account.persona
+            else {
+                "name": "User",
+                "age": 28,
+                "occupation": "freelancer",
+                "location": "Ho Chi Minh City",
+                "backstory": "Freelance designer looking for opportunities",
+                "tone": "casual, friendly",
+            }
+        )
 
         # Generate greeting message
         import asyncio
+
         loop = asyncio.new_event_loop()
-        greeting, new_state = loop.run_until_complete(engine.generate_response(
-            incoming_message="",  # First message, no incoming
-            persona_config=persona_config,
-            state=ConvState.GREETING,
-            category=task.category.value,
-            history=[],
-        ))
+        greeting, new_state = loop.run_until_complete(
+            engine.generate_response(
+                incoming_message="",  # First message, no incoming
+                persona_config=persona_config,
+                state=ConvState.GREETING,
+                category=task.category.value,
+                history=[],
+            )
+        )
         loop.close()
 
         # Send message via adapter
         loop = asyncio.new_event_loop()
-        sent = loop.run_until_complete(adapter.send_message(
-            target_id=target_user_id,
-            content=MessageContent(text=greeting, language="vi"),
-        ))
+        sent = loop.run_until_complete(
+            adapter.send_message(
+                target_id=target_user_id,
+                content=MessageContent(text=greeting, language="vi"),
+            )
+        )
         loop.close()
 
         if sent:
@@ -251,16 +269,13 @@ def process_incoming_message(message_data: dict):
     """Process an incoming message from a platform listener."""
     conversation_id = message_data.get("conversation_id")
     text = message_data.get("text", "")
-    sender_id = message_data.get("sender_id")
 
     logger.info("Processing incoming message for conversation %s", conversation_id)
 
     db = SessionLocal()
     try:
         # Load conversation
-        result = db.execute(
-            select(Conversation).where(Conversation.id == conversation_id)
-        )
+        result = db.execute(select(Conversation).where(Conversation.id == conversation_id))
         conv = result.scalar_one_or_none()
         if not conv:
             logger.error("Conversation %s not found", conversation_id)
@@ -285,7 +300,10 @@ def process_incoming_message(message_data: dict):
             .limit(20)
         )
         history = [
-            {"role": "user" if m.direction == MessageDirection.INBOUND else "assistant", "content": m.content}
+            {
+                "role": "user" if m.direction == MessageDirection.INBOUND else "assistant",
+                "content": m.content,
+            }
             for m in result.scalars().all()
         ]
 
@@ -297,23 +315,28 @@ def process_incoming_message(message_data: dict):
         # Generate response using conversation engine
         engine = ConversationEngine()
         import asyncio
+
         loop = asyncio.new_event_loop()
-        response, new_state = loop.run_until_complete(engine.generate_response(
-            incoming_message=text,
-            persona_config=persona_config,
-            state=ConvState(conv.state.value),
-            category=conv.task.category.value,
-            history=history,
-            context_summary=conv.context_summary,
-        ))
+        response, new_state = loop.run_until_complete(
+            engine.generate_response(
+                incoming_message=text,
+                persona_config=persona_config,
+                state=ConvState(conv.state.value),
+                category=conv.task.category.value,
+                history=history,
+                context_summary=conv.context_summary,
+            )
+        )
 
         # Update context summary with this exchange
-        updated_summary = loop.run_until_complete(engine.update_context_summary(
-            existing_summary=conv.context_summary,
-            incoming_message=text,
-            reply=response,
-            state=new_state,
-        ))
+        updated_summary = loop.run_until_complete(
+            engine.update_context_summary(
+                existing_summary=conv.context_summary,
+                incoming_message=text,
+                reply=response,
+                state=new_state,
+            )
+        )
         conv.context_summary = updated_summary
         loop.close()
 
@@ -325,18 +348,22 @@ def process_incoming_message(message_data: dict):
                 session_name=f"osint_{account.id}",
             )
             loop = asyncio.new_event_loop()
-            loop.run_until_complete(adapter.authenticate(
-                AccountCredentials(
-                    platform=account.platform.value,
-                    username=account.username,
-                    credentials=account.credentials,
+            loop.run_until_complete(
+                adapter.authenticate(
+                    AccountCredentials(
+                        platform=account.platform.value,
+                        username=account.username,
+                        credentials=account.credentials,
+                    )
                 )
-            ))
+            )
 
-            sent = loop.run_until_complete(adapter.send_message(
-                target_id=conv.target_user_id,
-                content=MessageContent(text=response, language="vi"),
-            ))
+            sent = loop.run_until_complete(
+                adapter.send_message(
+                    target_id=conv.target_user_id,
+                    content=MessageContent(text=response, language="vi"),
+                )
+            )
             loop.run_until_complete(adapter.disconnect())
             loop.close()
 

@@ -2,11 +2,10 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import sys
 import uuid
 from pathlib import Path
-
-logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
@@ -14,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.models.models import Conversation, IntelligenceRecord, Task, TaskStatus
+from app.models.models import (
+    Conversation,
+    ConversationState,
+    IntelligenceRecord,
+    Task,
+    TaskStatus,
+)
 from app.schemas.schemas import (
     ConversationResponse,
     IntelligenceListResponse,
@@ -24,11 +29,14 @@ from app.schemas.schemas import (
 )
 from app.workers.tasks import run_task
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
 def _get_manager():
     from app.main import manager
+
     return manager
 
 
@@ -40,6 +48,7 @@ TG_PROXY = ("http", "127.0.0.1", 7890)
 async def list_accounts():
     """Return accounts based on session/cookie files in the sessions/ directory."""
     import json
+
     accounts = []
     if not SESSION_DIR.exists():
         return accounts
@@ -59,55 +68,64 @@ async def list_accounts():
         name = session_file.stem
         stat = session_file.stat()
         meta = load_meta(name)
-        accounts.append({
-            "id": name,
-            "platform": "telegram",
-            "username": f"@{name}",
-            "display_name": meta.get("display_name", ""),
-            "health": meta.get("health", "green"),
-            "reply_policy": meta.get("reply_policy", {"private": True, "groups": False, "channels": False, "bots": False}),
-            "paused": meta.get("paused", False),
-            "persona": meta.get("persona", ""),
-            "proxy_url": "http://127.0.0.1:7890",
-            "is_active": True,
-            "last_action_at": stat.st_mtime,
-            "created_at": stat.st_ctime,
-            "session_file": str(session_file.name),
-        })
+        accounts.append(
+            {
+                "id": name,
+                "platform": "telegram",
+                "username": f"@{name}",
+                "display_name": meta.get("display_name", ""),
+                "health": meta.get("health", "green"),
+                "reply_policy": meta.get(
+                    "reply_policy",
+                    {"private": True, "groups": False, "channels": False, "bots": False},
+                ),
+                "paused": meta.get("paused", False),
+                "persona": meta.get("persona", ""),
+                "proxy_url": "http://127.0.0.1:7890",
+                "is_active": True,
+                "last_action_at": stat.st_mtime,
+                "created_at": stat.st_ctime,
+                "session_file": str(session_file.name),
+            }
+        )
 
     # Facebook cookies
     for cookie_file in sorted(SESSION_DIR.glob("*_cookies.json")):
         name = cookie_file.stem.replace("_cookies", "")
         stat = cookie_file.stat()
         meta = load_meta(name)
-        accounts.append({
-            "id": name,
-            "platform": "facebook",
-            "username": name,
-            "display_name": meta.get("display_name", ""),
-            "health": meta.get("health", "green"),
-            "is_active": True,
-            "last_action_at": stat.st_mtime,
-            "created_at": stat.st_ctime,
-            "session_file": str(cookie_file.name),
-        })
+        accounts.append(
+            {
+                "id": name,
+                "platform": "facebook",
+                "username": name,
+                "display_name": meta.get("display_name", ""),
+                "health": meta.get("health", "green"),
+                "is_active": True,
+                "last_action_at": stat.st_mtime,
+                "created_at": stat.st_ctime,
+                "session_file": str(cookie_file.name),
+            }
+        )
 
     # Zalo sessions
     for zalo_file in sorted(SESSION_DIR.glob("*_zalo.json")):
         name = zalo_file.stem.replace("_zalo", "")
         stat = zalo_file.stat()
         meta = load_meta(name)
-        accounts.append({
-            "id": name,
-            "platform": "zalo",
-            "username": name,
-            "display_name": meta.get("display_name", ""),
-            "health": meta.get("health", "green"),
-            "is_active": True,
-            "last_action_at": stat.st_mtime,
-            "created_at": stat.st_ctime,
-            "session_file": str(zalo_file.name),
-        })
+        accounts.append(
+            {
+                "id": name,
+                "platform": "zalo",
+                "username": name,
+                "display_name": meta.get("display_name", ""),
+                "health": meta.get("health", "green"),
+                "is_active": True,
+                "last_action_at": stat.st_mtime,
+                "created_at": stat.st_ctime,
+                "session_file": str(zalo_file.name),
+            }
+        )
 
     return accounts
 
@@ -116,7 +134,11 @@ async def list_accounts():
 async def delete_account(account_id: str):
     """Delete an account by removing its session/cookie file."""
     deleted = []
-    for pattern in [f"{account_id}.session", f"{account_id}_cookies.json", f"{account_id}_zalo.json"]:
+    for pattern in [
+        f"{account_id}.session",
+        f"{account_id}_cookies.json",
+        f"{account_id}_zalo.json",
+    ]:
         fpath = SESSION_DIR / pattern
         if fpath.exists():
             fpath.unlink()
@@ -133,6 +155,7 @@ async def delete_account(account_id: str):
 async def update_account(account_id: str, body: dict):
     """Update account metadata (display_name, health, etc.)."""
     import json
+
     meta_file = SESSION_DIR / f"{account_id}_meta.json"
     meta = {}
     if meta_file.exists():
@@ -158,10 +181,30 @@ async def list_personas():
     """List available persona presets."""
     return {
         "personas": [
-            {"key": "designer", "name": "Nguyen Van A", "desc": "自由设计师，28岁，胡志明市", "tone": "随和友好"},
-            {"key": "trader", "name": "Tran Minh Duc", "desc": "加密货币交易员，32岁，河内", "tone": "自信专业"},
-            {"key": "student", "name": "Le Thi Mai", "desc": "大学生，22岁，岘港", "tone": "好奇礼貌"},
-            {"key": "business", "name": "Pham Hoang Nam", "desc": "进出口贸易老板，35岁，胡志明市", "tone": "稳重可信"},
+            {
+                "key": "designer",
+                "name": "Nguyen Van A",
+                "desc": "自由设计师，28岁，胡志明市",
+                "tone": "随和友好",
+            },
+            {
+                "key": "trader",
+                "name": "Tran Minh Duc",
+                "desc": "加密货币交易员，32岁，河内",
+                "tone": "自信专业",
+            },
+            {
+                "key": "student",
+                "name": "Le Thi Mai",
+                "desc": "大学生，22岁，岘港",
+                "tone": "好奇礼貌",
+            },
+            {
+                "key": "business",
+                "name": "Pham Hoang Nam",
+                "desc": "进出口贸易老板，35岁，胡志明市",
+                "tone": "稳重可信",
+            },
         ]
     }
 
@@ -170,33 +213,45 @@ async def list_personas():
 async def check_session(account_id: str):
     """Lightweight session/cookie validity check for any platform."""
     import json
-    session_file = None
+
     platform = None
 
     if (SESSION_DIR / f"{account_id}.session").exists():
         platform = "telegram"
-        session_file = str(SESSION_DIR / f"{account_id}.session")
     elif (SESSION_DIR / f"{account_id}_cookies.json").exists():
         platform = "facebook"
-        session_file = str(SESSION_DIR / f"{account_id}_cookies.json")
     elif (SESSION_DIR / f"{account_id}_zalo.json").exists():
         platform = "zalo"
-        session_file = str(SESSION_DIR / f"{account_id}_zalo.json")
     else:
-        return {"valid": False, "message": "未找到 Session 文件", "platform": "unknown", "details": {}}
+        return {
+            "valid": False,
+            "message": "未找到 Session 文件",
+            "platform": "unknown",
+            "details": {},
+        }
 
     try:
         if platform == "telegram":
             from app.core.config import settings
             from app.services.platform.telegram_adapter import TelegramAdapter
-            adapter = TelegramAdapter(settings.TELEGRAM_API_ID, settings.TELEGRAM_API_HASH, session_name=str(SESSION_DIR / account_id))
+
+            # 之前这里写的是 settings.TELEGRAM_API_ID（该属性不存在），一调用就 AttributeError；
+            # 而且没传代理，在需要代理的网络里检测也会超时。
+            adapter = TelegramAdapter(
+                settings.tg_api_id,
+                settings.tg_api_hash,
+                session_name=str(SESSION_DIR / account_id),
+                proxy=TG_PROXY,
+            )
             result = await adapter.is_session_valid()
         elif platform == "facebook":
             from app.services.platform.facebook_adapter import FacebookAdapter
+
             adapter = FacebookAdapter(session_name=account_id)
             result = await adapter.is_session_valid()
         elif platform == "zalo":
             from app.services.platform.zalo_adapter import ZaloAdapter
+
             adapter = ZaloAdapter(session_name=account_id)
             result = await adapter.is_session_valid()
         else:
@@ -220,7 +275,12 @@ async def check_session(account_id: str):
         return result
     except Exception as e:
         logger.error("Session check failed for %s: %s", account_id, e)
-        return {"valid": False, "message": f"检测异常: {e}", "platform": platform, "details": {"error": str(e)}}
+        return {
+            "valid": False,
+            "message": f"检测异常: {e}",
+            "platform": platform,
+            "details": {"error": str(e)},
+        }
 
 
 # ── Account Login Flow ─────────────────────────────────
@@ -237,7 +297,9 @@ async def telegram_test_connection(body: dict):
 
     session_name = body.get("session_name", "").strip() or "test_connection"
     session_path = str(SESSION_DIR / session_name)
-    client = TelegramClient(session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, proxy=TG_PROXY)
+    client = TelegramClient(
+        session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, proxy=TG_PROXY
+    )
 
     try:
         await client.connect()
@@ -250,8 +312,14 @@ async def telegram_test_connection(body: dict):
             "status": "ok",
             "connected": True,
             "authorized": is_authorized,
-            "username": (getattr(me, 'username', None) or None) if me else None,
-            "message": "连接成功" + ("，已登录: @" + (getattr(me, 'username', '') or getattr(me, 'first_name', '') or 'Unknown') if me else ""),
+            "username": (getattr(me, "username", None) or None) if me else None,
+            "message": "连接成功"
+            + (
+                "，已登录: @"
+                + (getattr(me, "username", "") or getattr(me, "first_name", "") or "Unknown")
+                if me
+                else ""
+            ),
         }
     except Exception as e:
         try:
@@ -285,7 +353,9 @@ async def telegram_send_code(body: dict):
         phone = "+" + phone
 
     session_path = str(SESSION_DIR / session_name)
-    client = TelegramClient(session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, proxy=TG_PROXY)
+    client = TelegramClient(
+        session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, proxy=TG_PROXY
+    )
 
     max_retries = 3
     for attempt in range(max_retries):
@@ -317,7 +387,12 @@ async def telegram_send_code(body: dict):
                 pass
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
-                client = TelegramClient(session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, proxy=TG_PROXY)
+                client = TelegramClient(
+                    session_path,
+                    api_id=settings.tg_api_id,
+                    api_hash=settings.tg_api_hash,
+                    proxy=TG_PROXY,
+                )
                 continue
             raise HTTPException(400, f"无法连接到Telegram服务器，请检查网络/代理设置: {e}")
         except Exception as e:
@@ -356,15 +431,23 @@ async def telegram_verify_code(body: dict):
                 password=password or None,
             )
         me = await client.get_me()
-        username = getattr(me, 'username', None) or getattr(me, 'first_name', 'Unknown')
+        username = getattr(me, "username", None) or getattr(me, "first_name", "Unknown")
         await client.disconnect()
         del _pending_logins[session_name]
         return {"status": "success", "username": username, "user_id": me.id}
     except Exception as e:
         error_msg = str(e)
-        if "password" in error_msg.lower() or "Two-steps" in error_msg or "SessionPasswordNeededError" in error_msg:
+        if (
+            "password" in error_msg.lower()
+            or "Two-steps" in error_msg
+            or "SessionPasswordNeededError" in error_msg
+        ):
             return {"status": "need_password", "message": "此账号需要两步验证密码"}
-        if "code" in error_msg.lower() or "PhoneCodeInvalid" in error_msg or "PhoneCodeExpired" in error_msg:
+        if (
+            "code" in error_msg.lower()
+            or "PhoneCodeInvalid" in error_msg
+            or "PhoneCodeExpired" in error_msg
+        ):
             del _pending_logins[session_name]
             raise HTTPException(400, f"验证码无效或已过期，请重新发送: {error_msg}")
         raise HTTPException(400, f"验证失败: {error_msg}")
@@ -377,12 +460,17 @@ _fb_login_processes: dict[str, object] = {}
 async def facebook_login_start(body: dict):
     """Launch a visible browser window for manual Facebook login."""
     import subprocess
+
     session_name = body.get("session_name", "fb_default").strip()
 
     if session_name in _fb_login_processes:
         proc = _fb_login_processes[session_name]
         if proc.poll() is None:
-            return {"status": "in_progress", "message": "浏览器窗口已打开，请在弹出的窗口中完成登录", "session_name": session_name}
+            return {
+                "status": "in_progress",
+                "message": "浏览器窗口已打开，请在弹出的窗口中完成登录",
+                "session_name": session_name,
+            }
 
     script_path = str(Path(__file__).resolve().parent.parent.parent / "quick_login_facebook.py")
     venv_python = str(Path(__file__).resolve().parent.parent.parent / "venv" / "bin" / "python3")
@@ -395,10 +483,14 @@ async def facebook_login_start(body: dict):
             stderr=subprocess.PIPE,
         )
         _fb_login_processes[session_name] = proc
-        logger.info("Facebook login browser launched for session: %s (PID: %d)", session_name, proc.pid)
+        logger.info(
+            "Facebook login browser launched for session: %s (PID: %d)", session_name, proc.pid
+        )
         return {
             "status": "browser_opened",
-            "message": "浏览器窗口已弹出，请在窗口中登录 Facebook。登录完成后点击下方「完成登录」按钮。",
+            "message": (
+                "浏览器窗口已弹出，请在窗口中登录 Facebook。登录完成后点击下方「完成登录」按钮。"
+            ),
             "session_name": session_name,
         }
     except Exception as e:
@@ -425,11 +517,20 @@ async def facebook_login_complete(body: dict):
     cookie_file = SESSION_DIR / f"{session_name}_cookies.json"
     if cookie_file.exists():
         import json
+
         with open(cookie_file) as f:
             cookies = json.load(f)
-        return {"status": "success", "message": f"登录成功，已保存 {len(cookies)} 个 cookies", "session_name": session_name}
+        return {
+            "status": "success",
+            "message": f"登录成功，已保存 {len(cookies)} 个 cookies",
+            "session_name": session_name,
+        }
     else:
-        return {"status": "failed", "message": "未找到 cookie 文件，请确认已在浏览器中完成登录", "session_name": session_name}
+        return {
+            "status": "failed",
+            "message": "未找到 cookie 文件，请确认已在浏览器中完成登录",
+            "session_name": session_name,
+        }
 
 
 @router.post("/accounts/zalo/login")
@@ -463,10 +564,12 @@ async def zalo_login(body: dict):
 
 # ── Group Management ────────────────────────────────────
 
+
 @router.post("/groups/search")
 async def search_groups(body: dict):
     """Search Telegram groups by keyword or natural language query."""
     import traceback as tb
+
     try:
         from app.core.config import settings
         from app.services.platform.base import AccountCredentials, PlatformName
@@ -485,21 +588,31 @@ async def search_groups(body: dict):
             try:
                 logger.info("AI search: generating keywords for '%s'", query)
                 from openai import AsyncOpenAI
-                client = AsyncOpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
+
+                client = AsyncOpenAI(
+                    api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url
+                )
                 resp = await client.chat.completions.create(
                     model=settings.deepseek_model,
-                    messages=[{
-                        "role": "user",
-                        "content": (
-                            f"User wants to find Telegram groups about: \"{query}\"\n"
-                            "Generate 3-5 short search keywords (in the most likely language of the groups) "
-                            "that would find relevant Telegram groups. Return ONLY the keywords, one per line."
-                        ),
-                    }],
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": (
+                                f'User wants to find Telegram groups about: "{query}"\n'
+                                "Generate 3-5 short search keywords (in the most likely "
+                                "language of the groups) that would find relevant "
+                                "Telegram groups. Return ONLY the keywords, one per line."
+                            ),
+                        }
+                    ],
                     temperature=0.3,
                     max_tokens=100,
                 )
-                ai_keywords = [k.strip() for k in (resp.choices[0].message.content or "").strip().split("\n") if k.strip()]
+                ai_keywords = [
+                    k.strip()
+                    for k in (resp.choices[0].message.content or "").strip().split("\n")
+                    if k.strip()
+                ]
                 logger.info("AI generated search keywords: %s", ai_keywords)
             except Exception as e:
                 logger.warning("AI keyword generation failed: %s", e, exc_info=True)
@@ -508,7 +621,12 @@ async def search_groups(body: dict):
         # Search with original query + AI keywords
         session_path = str(SESSION_DIR / account)
         logger.info("Group search: session=%s, terms=%s", session_path, [query] + ai_keywords)
-        adapter = TelegramAdapter(api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, session_name=session_path, proxy=TG_PROXY)
+        adapter = TelegramAdapter(
+            api_id=settings.tg_api_id,
+            api_hash=settings.tg_api_hash,
+            session_name=session_path,
+            proxy=TG_PROXY,
+        )
         creds = AccountCredentials(platform=PlatformName.TELEGRAM, username=account, credentials={})
 
         auth_ok = await adapter.authenticate(creds)
@@ -524,12 +642,14 @@ async def search_groups(body: dict):
             for g in results:
                 if g.group_id not in seen_ids:
                     seen_ids.add(g.group_id)
-                    all_results.append({
-                        "group_id": g.group_id,
-                        "name": g.name,
-                        "member_count": g.member_count,
-                        "description": g.description,
-                    })
+                    all_results.append(
+                        {
+                            "group_id": g.group_id,
+                            "name": g.name,
+                            "member_count": g.member_count,
+                            "description": g.description,
+                        }
+                    )
 
         await adapter.disconnect()
         return {"results": all_results[:20], "keywords_used": search_terms}
@@ -554,7 +674,12 @@ async def join_group(body: dict):
         raise HTTPException(400, "group_id is required")
 
     session_path = str(SESSION_DIR / account)
-    adapter = TelegramAdapter(api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, session_name=session_path, proxy=TG_PROXY)
+    adapter = TelegramAdapter(
+        api_id=settings.tg_api_id,
+        api_hash=settings.tg_api_hash,
+        session_name=session_path,
+        proxy=TG_PROXY,
+    )
     creds = AccountCredentials(platform=PlatformName.TELEGRAM, username=account, credentials={})
 
     try:
@@ -583,7 +708,12 @@ async def add_group_by_link(body: dict):
         raise HTTPException(400, "link is required")
 
     session_path = str(SESSION_DIR / account)
-    adapter = TelegramAdapter(api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, session_name=session_path, proxy=TG_PROXY)
+    adapter = TelegramAdapter(
+        api_id=settings.tg_api_id,
+        api_hash=settings.tg_api_hash,
+        session_name=session_path,
+        proxy=TG_PROXY,
+    )
     creds = AccountCredentials(platform=PlatformName.TELEGRAM, username=account, credentials={})
 
     try:
@@ -604,6 +734,7 @@ async def add_group_by_link(body: dict):
         title = getattr(entity, "title", link)
 
         from telethon.tl.functions.channels import JoinChannelRequest
+
         try:
             await client(JoinChannelRequest(entity))
             await adapter.disconnect()
@@ -615,7 +746,12 @@ async def add_group_by_link(body: dict):
                 return {"status": "joined", "group_id": group_id, "name": title, "note": "已是成员"}
             if "successfully requested" in err_str.lower():
                 await adapter.disconnect()
-                return {"status": "joined", "group_id": group_id, "name": title, "note": "已发送加入申请，等待审批"}
+                return {
+                    "status": "joined",
+                    "group_id": group_id,
+                    "name": title,
+                    "note": "已发送加入申请，等待审批",
+                }
             await adapter.disconnect()
             return {"status": "failed", "message": f"加入失败: {err_str}"}
     except Exception as e:
@@ -623,6 +759,7 @@ async def add_group_by_link(body: dict):
 
 
 # ── Tasks ──────────────────────────────────────────────
+
 
 @router.post("/tasks", response_model=TaskResponse)
 async def create_task(body: TaskCreate, db: AsyncSession = Depends(get_db)):
@@ -640,11 +777,13 @@ async def create_task(body: TaskCreate, db: AsyncSession = Depends(get_db)):
     await db.refresh(task)
 
     # Notify via WebSocket
-    await _get_manager().broadcast({
-        "type": "task_created",
-        "task_id": str(task.id),
-        "name": task.name,
-    })
+    await _get_manager().broadcast(
+        {
+            "type": "task_created",
+            "task_id": str(task.id),
+            "name": task.name,
+        }
+    )
 
     return task
 
@@ -667,10 +806,13 @@ async def start_task(task_id: str, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     # Notify via WebSocket
-    await _get_manager().send_to_task(task_id, {
-        "type": "task_started",
-        "task_id": task_id,
-    })
+    await _get_manager().send_to_task(
+        task_id,
+        {
+            "type": "task_started",
+            "task_id": task_id,
+        },
+    )
 
     return {"status": "started", "task_id": task_id}
 
@@ -691,6 +833,7 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
 
 
 # ── Conversations ──────────────────────────────────────
+
 
 @router.get("/conversations", response_model=list[ConversationResponse])
 async def list_conversations(
@@ -721,33 +864,37 @@ async def get_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
 @router.post("/conversations/{conv_id}/end")
 async def end_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
     """End a conversation and mark the target user as blocked."""
-    from datetime import datetime
+    from datetime import datetime, timezone
 
-    result = await db.execute(
-        select(Conversation).where(Conversation.id == conv_id)
-    )
+    result = await db.execute(select(Conversation).where(Conversation.id == conv_id))
     conv = result.scalar_one_or_none()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     # Mark conversation as ended
-    conv.ended_at = datetime.now(datetime.timezone.utc)
-    conv.state = "exit"  # Changed to exit state
+    # 注意两点：datetime 这里导入的是类而不是模块，取时区要用 timezone；
+    # 状态必须用枚举成员，PG 里存的是成员名（EXIT），传小写字符串会报枚举值非法。
+    conv.ended_at = datetime.now(timezone.utc)
+    conv.state = ConversationState.EXIT
 
     await db.commit()
 
     # Notify via WebSocket
-    await _get_manager().send_to_task(str(conv.task_id), {
-        "type": "conversation_ended",
-        "conversation_id": conv_id,
-        "target_user_id": conv.target_user_id,
-        "reason": "blocked_by_operator",
-    })
+    await _get_manager().send_to_task(
+        str(conv.task_id),
+        {
+            "type": "conversation_ended",
+            "conversation_id": conv_id,
+            "target_user_id": conv.target_user_id,
+            "reason": "blocked_by_operator",
+        },
+    )
 
     return {"status": "ended", "conversation_id": conv_id}
 
 
 # ── Intelligence ──────────────────────────────────────
+
 
 @router.get("/intelligence", response_model=IntelligenceListResponse)
 async def list_intelligence(
@@ -793,8 +940,6 @@ async def list_intelligence(
 
 # ── Services ───────────────────────────────────────────
 
-import subprocess
-
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 
 SERVICE_MAP = {
@@ -838,12 +983,14 @@ async def get_services_status():
         pid_file = BACKEND_DIR / info["pid_file"]
         pid = _read_pid(pid_file)
         running = _is_running(pid)
-        statuses.append({
-            "platform": platform,
-            "running": running,
-            "pid": pid if running else None,
-            "script": info["script"],
-        })
+        statuses.append(
+            {
+                "platform": platform,
+                "running": running,
+                "pid": pid if running else None,
+                "script": info["script"],
+            }
+        )
     return statuses
 
 

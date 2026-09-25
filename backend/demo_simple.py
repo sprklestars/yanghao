@@ -32,7 +32,7 @@ def demo_verification():
     challenge_msg = verification_manager.get_challenge_message(test_user_id)
     if challenge_msg:
         print("\n📩 系统发送验证消息:")
-        for line in challenge_msg.split('\n'):
+        for line in challenge_msg.split("\n"):
             print(f"   {line}")
 
     # 第二步: 用户回答错误
@@ -67,10 +67,10 @@ def demo_warming_strategy():
 
     # 创建不同阶段的测试账号
     test_accounts = [
-        ("new_account", 3),      # 新号期
-        ("warming_account", 15), # 温号期
+        ("new_account", 3),  # 新号期
+        ("warming_account", 15),  # 温号期
         ("stable_account", 60),  # 稳定期
-        ("mature_account", 120), # 成熟期
+        ("mature_account", 120),  # 成熟期
     ]
 
     for account_id, age_days in test_accounts:
@@ -98,7 +98,10 @@ def demo_warming_strategy():
         print(f"   IP一致性: {'✅ 一致' if profile.ip_consistent else '❌ 不一致'}")
         print("   每日限额:")
         print(f"      • 加群: {profile.config.max_groups_per_day}个")
-        print(f"      • 发消息: {profile.config.max_messages_per_hour}条/小时, {profile.config.max_messages_per_day}条/天")
+        print(
+            f"      • 发消息: {profile.config.max_messages_per_hour}条/小时, "
+            f"{profile.config.max_messages_per_day}条/天"
+        )
         print(f"      • 陌生人消息: {profile.config.max_stranger_messages_per_day}条/天")
         print(f"      • 好友请求: {profile.config.max_friend_requests_per_day}个/天")
 
@@ -222,6 +225,7 @@ def main():
     except Exception as e:
         print(f"\n 演示出错: {e}")
         import traceback
+
         traceback.print_exc()
 
 

@@ -33,7 +33,7 @@ from app.services.conversation.verification import verification_manager
 
 # 配置
 SESSION_NAME = "sessions/printer"
-PROXY = ('http', '127.0.0.1', 7890)
+PROXY = ("http", "127.0.0.1", 7890)
 
 PERSONA_PRESETS = {
     "designer": {
@@ -81,11 +81,8 @@ LOG_FILE = LOG_DIR / "chat_demo.log"
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
@@ -106,11 +103,14 @@ class WSBridge:
     async def connect(self):
         try:
             import websockets
+
             self.ws = await websockets.connect(self.url)
             self.connected = True
             logger.info("🔗 WebSocket bridge connected to %s", self.url)
         except Exception as e:
-            logger.warning("⚠️ WebSocket bridge failed: %s (frontend will not receive live updates)", e)
+            logger.warning(
+                "⚠️ WebSocket bridge failed: %s (frontend will not receive live updates)", e
+            )
             self.connected = False
 
     async def send(self, message: dict):
@@ -120,6 +120,7 @@ class WSBridge:
             return
         try:
             import json
+
             await self.ws.send(json.dumps(message))
         except Exception as e:
             logger.warning("⚠️ WebSocket send failed: %s", e)
@@ -129,6 +130,7 @@ class WSBridge:
             if self.connected and self.ws:
                 try:
                     import json
+
                     await self.ws.send(json.dumps(message))
                 except Exception:
                     pass
@@ -161,6 +163,7 @@ class PersistentChatBot:
 
     def _load_meta_config(self):
         import json
+
         session_name = SESSION_NAME.split("/")[-1]
         meta_file = Path(SESSION_NAME).parent / f"{session_name}_meta.json"
         if meta_file.exists():
@@ -183,10 +186,7 @@ class PersistentChatBot:
 
                 # 创建客户端(使用代理)
                 self.client = TelegramClient(
-                    SESSION_NAME,
-                    settings.tg_api_id,
-                    settings.tg_api_hash,
-                    proxy=PROXY
+                    SESSION_NAME, settings.tg_api_id, settings.tg_api_hash, proxy=PROXY
                 )
 
                 await self.client.connect()
@@ -204,7 +204,7 @@ class PersistentChatBot:
 
             except Exception as e:
                 self.reconnect_attempts += 1
-                wait_time = min(2 ** self.reconnect_attempts, 300)  # 指数退避,最多5分钟
+                wait_time = min(2**self.reconnect_attempts, 300)  # 指数退避,最多5分钟
                 logger.error(f"❌ 连接失败 ({e}), {wait_time}秒后重试...")
                 await asyncio.sleep(wait_time)
 
@@ -223,23 +223,25 @@ class PersistentChatBot:
                     logger.debug("⏸ 账号已暂停回复，忽略消息")
                     # Still push inbound message to frontend for monitoring
                     sender = await event.get_sender()
-                    user_name = getattr(sender, 'first_name', None) or "Unknown"
+                    user_name = getattr(sender, "first_name", None) or "Unknown"
                     message_text = event.message.text or ""
-                    await self.ws_bridge.send({
-                        "type": "telegram_message",
-                        "direction": "inbound",
-                        "account": SESSION_NAME.split("/")[-1],
-                        "sender_id": str(event.sender_id),
-                        "sender_name": user_name,
-                        "content": message_text,
-                        "timestamp": datetime.now().isoformat(),
-                    })
+                    await self.ws_bridge.send(
+                        {
+                            "type": "telegram_message",
+                            "direction": "inbound",
+                            "account": SESSION_NAME.split("/")[-1],
+                            "sender_id": str(event.sender_id),
+                            "sender_name": user_name,
+                            "content": message_text,
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                    )
                     return
 
                 policy = self.reply_policy
 
                 sender = await event.get_sender()
-                is_bot = getattr(sender, 'bot', False)
+                is_bot = getattr(sender, "bot", False)
                 is_private = event.is_private
 
                 is_group = False
@@ -249,15 +251,19 @@ class PersistentChatBot:
                         chat = await event.get_chat()
                         from telethon.tl.types import Channel
                         from telethon.tl.types import Chat as TGChat
+
                         if isinstance(chat, Channel):
-                            is_channel = getattr(chat, 'broadcast', False)
+                            is_channel = getattr(chat, "broadcast", False)
                             is_group = not is_channel
                         elif isinstance(chat, TGChat):
                             is_group = True
                     except Exception:
                         is_group = True
 
-                logger.info(f"📨 收到消息: private={is_private} group={is_group} channel={is_channel} bot={is_bot} policy={policy}")
+                logger.info(
+                    f"📨 收到消息: private={is_private} group={is_group} "
+                    f"channel={is_channel} bot={is_bot} policy={policy}"
+                )
 
                 if is_bot and not policy.get("bots", False):
                     return
@@ -269,32 +275,33 @@ class PersistentChatBot:
                     return
 
                 user_id = str(event.sender_id)
-                user_name = getattr(sender, 'first_name', None) or "Unknown"
+                user_name = getattr(sender, "first_name", None) or "Unknown"
                 message_text = event.message.text or ""
 
                 logger.info(f"📨 收到消息 from {user_name} ({user_id}): {message_text[:50]}")
 
                 # Push incoming message to frontend
-                await self.ws_bridge.send({
-                    "type": "telegram_message",
-                    "direction": "inbound",
-                    "account": SESSION_NAME.split("/")[-1],
-                    "sender_id": user_id,
-                    "sender_name": user_name,
-                    "content": message_text,
-                    "timestamp": datetime.now().isoformat(),
-                })
+                await self.ws_bridge.send(
+                    {
+                        "type": "telegram_message",
+                        "direction": "inbound",
+                        "account": SESSION_NAME.split("/")[-1],
+                        "sender_id": user_id,
+                        "sender_name": user_name,
+                        "content": message_text,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
 
                 # 检查是否被拉黑
                 from app.services.security.blocklist import is_blocked
+
                 if is_blocked(user_id):
                     logger.info(f"🚫 用户 {user_id} 已被拉黑,忽略消息")
                     return
 
                 # 生成回复
-                response, new_state = await self.generate_response(
-                    message_text, user_id, CATEGORY
-                )
+                response, new_state = await self.generate_response(message_text, user_id, CATEGORY)
 
                 # 模拟打字延迟（缩短）
                 typing_delay = min(len(response) * 0.02, 1.0)
@@ -306,15 +313,17 @@ class PersistentChatBot:
                 logger.info(f"💬 已回复: {response[:100]}")
 
                 # Push outgoing message to frontend
-                await self.ws_bridge.send({
-                    "type": "telegram_message",
-                    "direction": "outbound",
-                    "account": SESSION_NAME.split("/")[-1],
-                    "sender_id": user_id,
-                    "sender_name": user_name,
-                    "content": response,
-                    "timestamp": datetime.now().isoformat(),
-                })
+                await self.ws_bridge.send(
+                    {
+                        "type": "telegram_message",
+                        "direction": "outbound",
+                        "account": SESSION_NAME.split("/")[-1],
+                        "sender_id": user_id,
+                        "sender_name": user_name,
+                        "content": response,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
 
                 self.last_activity = datetime.now()
 
@@ -342,6 +351,7 @@ class PersistentChatBot:
 
                 from app.core.database import async_session_factory
                 from app.models.models import Conversation
+
                 async with async_session_factory() as session:
                     result = await session.execute(
                         sa_select(Conversation).where(
@@ -379,6 +389,7 @@ class PersistentChatBot:
 
                     from app.core.database import async_session_factory
                     from app.models.models import Conversation
+
                     async with async_session_factory() as session:
                         result = await session.execute(
                             sa_select(Conversation).where(
@@ -424,7 +435,7 @@ class PersistentChatBot:
         if self.client:
             try:
                 await self.client.disconnect()
-            except:
+            except Exception:
                 pass
 
         await asyncio.sleep(2)
@@ -438,13 +449,13 @@ class PersistentChatBot:
 
     async def run(self):
         """主运行循环"""
-        logger.info("="*60)
+        logger.info("=" * 60)
         logger.info("🚀 Telegram OSINT - 持久化聊天机器人")
-        logger.info("="*60)
+        logger.info("=" * 60)
         logger.info(f"Session: {SESSION_NAME}")
         logger.info(f"Proxy: {PROXY[1]}:{PROXY[2]}")
         logger.info(f"Persona: {PERSONA_CONFIG['name']}")
-        logger.info("="*60)
+        logger.info("=" * 60)
 
         # 连接
         if not await self.connect():
@@ -479,7 +490,7 @@ class PersistentChatBot:
             if self.client:
                 try:
                     await self.client.disconnect()
-                except:
+                except Exception:
                     pass
 
             logger.info("👋 服务已停止")
@@ -487,14 +498,14 @@ class PersistentChatBot:
 
 def write_pid():
     """写入PID文件"""
-    with open(PID_FILE, 'w') as f:
+    with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
 
 def read_pid():
     """读取PID文件"""
     if PID_FILE.exists():
-        with open(PID_FILE, 'r') as f:
+        with open(PID_FILE, "r") as f:
             return int(f.read().strip())
     return None
 
@@ -516,15 +527,15 @@ async def main():
         remove_pid()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     if len(sys.argv) > 1:
         command = sys.argv[1]
 
-        if command == 'start':
+        if command == "start":
             logger.info("启动持久化聊天机器人...")
             asyncio.run(main())
 
-        elif command == 'stop':
+        elif command == "stop":
             pid = read_pid()
             if pid:
                 logger.info(f"停止进程 {pid}...")
@@ -534,7 +545,7 @@ if __name__ == '__main__':
             else:
                 logger.info("没有运行中的进程")
 
-        elif command == 'status':
+        elif command == "status":
             pid = read_pid()
             if pid:
                 try:
@@ -546,9 +557,9 @@ if __name__ == '__main__':
             else:
                 logger.info("❌ 未运行")
 
-        elif command == 'logs':
+        elif command == "logs":
             if LOG_FILE.exists():
-                os.system(f'tail -f {LOG_FILE}')
+                os.system(f"tail -f {LOG_FILE}")
             else:
                 logger.info("日志文件不存在")
 

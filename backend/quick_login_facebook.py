@@ -27,9 +27,9 @@ async def login_facebook(session_name: str) -> bool:
 
     cookie_file = SESSION_DIR / f"{session_name}_cookies.json"
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"🔐 Facebook Login — Session: {session_name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print("\n📝 Instructions:")
     print("1. A browser window will open")
     print("2. Log in to your Facebook account manually")
@@ -41,16 +41,18 @@ async def login_facebook(session_name: str) -> bool:
     browser = await pw.chromium.launch(
         headless=False,
         args=[
-            '--disable-blink-features=AutomationControlled',
-            '--disable-infobars',
-            '--no-first-run',
-            '--no-default-browser-check',
-            '--disable-dev-shm-usage',
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-dev-shm-usage",
         ],
     )
     context = await browser.new_context(
-        viewport={"width": random.choice([1366, 1440, 1536, 1920]),
-                  "height": random.choice([768, 900, 864, 1080])},
+        viewport={
+            "width": random.choice([1366, 1440, 1536, 1920]),
+            "height": random.choice([768, 900, 864, 1080]),
+        },
         locale="vi-VN",
         timezone_id="Asia/Ho_Chi_Minh",
         user_agent=(
@@ -119,7 +121,7 @@ async def login_facebook(session_name: str) -> bool:
 
     print("\n🚀 Next step:")
     print("   python persistent_facebook_demo.py start")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
     return True
 
 

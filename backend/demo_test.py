@@ -126,14 +126,14 @@ async def demo_warming_strategy():
 
     # 创建不同阶段的测试账号
     test_accounts = [
-        ("new_account", 3),      # 新号期
-        ("warming_account", 15), # 温号期
+        ("new_account", 3),  # 新号期
+        ("warming_account", 15),  # 温号期
         ("stable_account", 60),  # 稳定期
-        ("mature_account", 120), # 成熟期
+        ("mature_account", 120),  # 成熟期
     ]
 
     for account_id, age_days in test_accounts:
-        created_at = datetime.now() - __import__('datetime').timedelta(days=age_days)
+        created_at = datetime.now() - __import__("datetime").timedelta(days=age_days)
         profile = warming_manager.create_profile(
             account_id=account_id,
             created_at=created_at,
@@ -237,6 +237,7 @@ async def main():
     except Exception as e:
         print(f"\n❌ 演示出错: {e}")
         import traceback
+
         traceback.print_exc()
 
 

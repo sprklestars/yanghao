@@ -69,37 +69,41 @@ class FacebookAdapter(PlatformAdapter):
 
             self._playwright = await async_playwright().start()
 
-            proxy_url = credentials.credentials.get('proxy', 'http://127.0.0.1:7890')
+            proxy_url = credentials.credentials.get("proxy", "http://127.0.0.1:7890")
 
             self._browser = await self._playwright.chromium.launch(
                 headless=True,
                 proxy={"server": proxy_url},
                 args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-infobars',
-                    '--no-first-run',
-                    '--no-default-browser-check',
-                    '--disable-dev-shm-usage',
-                    '--no-sandbox',
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
                 ],
             )
 
             self._context = await self._browser.new_context(
-                viewport={'width': random.choice([1366, 1440, 1536, 1920]),
-                          'height': random.choice([768, 900, 864, 1080])},
+                viewport={
+                    "width": random.choice([1366, 1440, 1536, 1920]),
+                    "height": random.choice([768, 900, 864, 1080]),
+                },
                 user_agent=(
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/125.0.0.0 Safari/537.36'
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36"
                 ),
-                locale='vi-VN',
-                timezone_id='Asia/Ho_Chi_Minh',
-                color_scheme='light',
+                locale="vi-VN",
+                timezone_id="Asia/Ho_Chi_Minh",
+                color_scheme="light",
                 extra_http_headers={
-                    'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
-                    'sec-ch-ua': '"Chromium";v="125", "Not.A/Brand";v="24", "Google Chrome";v="125"',
-                    'sec-ch-ua-mobile': '?0',
-                    'sec-ch-ua-platform': '"Windows"',
+                    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "sec-ch-ua": (
+                        '"Chromium";v="125", "Not.A/Brand";v="24", "Google Chrome";v="125"'
+                    ),
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
                 },
             )
 
@@ -112,8 +116,9 @@ class FacebookAdapter(PlatformAdapter):
             try:
                 import json
                 import os
+
                 if os.path.exists(cookie_file):
-                    with open(cookie_file, 'r') as f:
+                    with open(cookie_file, "r") as f:
                         cookies = json.load(f)
                     await self._context.add_cookies(cookies)
                     has_cookies = True
@@ -122,7 +127,9 @@ class FacebookAdapter(PlatformAdapter):
                 logger.warning("Failed to load saved session: %s", e)
 
             # Navigate to Facebook
-            await self._page.goto('https://www.facebook.com/', wait_until='domcontentloaded', timeout=60000)
+            await self._page.goto(
+                "https://www.facebook.com/", wait_until="domcontentloaded", timeout=60000
+            )
             await asyncio.sleep(3)
 
             if has_cookies:
@@ -146,8 +153,8 @@ class FacebookAdapter(PlatformAdapter):
                     return True
 
             # No cookies — need email/password login
-            email = credentials.credentials.get('email')
-            password = credentials.credentials.get('password')
+            email = credentials.credentials.get("email")
+            password = credentials.credentials.get("password")
 
             if not email or not password:
                 logger.error("No saved cookies and no email/password provided")
@@ -165,14 +172,15 @@ class FacebookAdapter(PlatformAdapter):
             await self._page.click('button[type="submit"]')
 
             # Wait for navigation
-            await self._page.wait_for_load_state('domcontentloaded', timeout=60000)
+            await self._page.wait_for_load_state("domcontentloaded", timeout=60000)
 
             # Save cookies for future sessions
             cookies = await self._context.cookies()
             import json
             import os
-            os.makedirs('sessions', exist_ok=True)
-            with open(f"sessions/{self._session_name}_cookies.json", 'w') as f:
+
+            os.makedirs("sessions", exist_ok=True)
+            with open(f"sessions/{self._session_name}_cookies.json", "w") as f:
                 json.dump(cookies, f)
 
             self._is_authenticated = True
@@ -202,11 +210,11 @@ class FacebookAdapter(PlatformAdapter):
         try:
             # Navigate to groups search
             search_url = f"https://www.facebook.com/search/groups/?q={query}"
-            await self._page.goto(search_url, wait_until='networkidle')
+            await self._page.goto(search_url, wait_until="networkidle")
 
             # Human-like scrolling
             for _ in range(3):
-                await self._page.evaluate('window.scrollBy(0, 500)')
+                await self._page.evaluate("window.scrollBy(0, 500)")
                 await asyncio.sleep(random.uniform(1, 2))
 
             # Extract group information
@@ -215,27 +223,31 @@ class FacebookAdapter(PlatformAdapter):
             for i, group in enumerate(groups[:limit]):
                 try:
                     name_elem = await group.query_selector('span[dir="auto"]')
-                    name = await name_elem.inner_text() if name_elem else f"Group {i+1}"
+                    name = await name_elem.inner_text() if name_elem else f"Group {i + 1}"
 
                     members_elem = await group.query_selector('span:text-matches("\\d+.*members?")')
                     members_text = await members_elem.inner_text() if members_elem else "0 members"
-                    member_count = int(''.join(filter(str.isdigit, members_text)) or "0")
+                    member_count = int("".join(filter(str.isdigit, members_text)) or "0")
 
-                    desc_elem = await group.query_selector('span:not([dir]):not([class])')
+                    desc_elem = await group.query_selector("span:not([dir]):not([class])")
                     description = await desc_elem.inner_text() if desc_elem else ""
 
                     # Extract group ID from URL
                     link_elem = await group.query_selector('a[href*="/groups/"]')
-                    href = await link_elem.get_attribute('href') if link_elem else ""
-                    group_id = href.split('/groups/')[1].split('/')[0] if '/groups/' in href else str(i)
+                    href = await link_elem.get_attribute("href") if link_elem else ""
+                    group_id = (
+                        href.split("/groups/")[1].split("/")[0] if "/groups/" in href else str(i)
+                    )
 
-                    results.append(GroupInfo(
-                        group_id=group_id,
-                        name=name.strip(),
-                        member_count=member_count,
-                        description=description.strip()[:200],
-                        platform=PlatformName.FACEBOOK,
-                    ))
+                    results.append(
+                        GroupInfo(
+                            group_id=group_id,
+                            name=name.strip(),
+                            member_count=member_count,
+                            description=description.strip()[:200],
+                            platform=PlatformName.FACEBOOK,
+                        )
+                    )
                 except Exception as e:
                     logger.warning("Failed to extract group %d: %s", i, e)
                     continue
@@ -254,10 +266,12 @@ class FacebookAdapter(PlatformAdapter):
 
         try:
             group_url = f"https://www.facebook.com/groups/{group_id}"
-            await self._page.goto(group_url, wait_until='networkidle')
+            await self._page.goto(group_url, wait_until="networkidle")
 
             # Find and click join button
-            join_button = await self._page.query_selector('button:has-text("Tham gia"), button:has-text("Join")')
+            join_button = await self._page.query_selector(
+                'button:has-text("Tham gia"), button:has-text("Join")'
+            )
 
             if join_button:
                 await join_button.click()
@@ -283,10 +297,12 @@ class FacebookAdapter(PlatformAdapter):
 
         try:
             profile_url = f"https://www.facebook.com/{user_id}"
-            await self._page.goto(profile_url, wait_until='networkidle')
+            await self._page.goto(profile_url, wait_until="networkidle")
 
             # Find and click add friend button
-            add_friend_btn = await self._page.query_selector('button:has-text("Thêm bạn bè"), button:has-text("Add Friend")')
+            add_friend_btn = await self._page.query_selector(
+                'button:has-text("Thêm bạn bè"), button:has-text("Add Friend")'
+            )
 
             if add_friend_btn:
                 await add_friend_btn.click()
@@ -318,13 +334,15 @@ class FacebookAdapter(PlatformAdapter):
 
             # Navigate to Messenger
             messenger_url = f"https://www.messenger.com/t/{target_id}"
-            await self._page.goto(messenger_url, wait_until='networkidle')
+            await self._page.goto(messenger_url, wait_until="networkidle")
 
             # Wait for message input to be ready
             await asyncio.sleep(random.uniform(2, 4))
 
             # Type message with human-like delays
-            message_input = await self._page.query_selector('[contenteditable="true"], textarea[placeholder*="Aa"]')
+            message_input = await self._page.query_selector(
+                '[contenteditable="true"], textarea[placeholder*="Aa"]'
+            )
 
             if message_input:
                 await message_input.focus()
@@ -334,7 +352,9 @@ class FacebookAdapter(PlatformAdapter):
                 await asyncio.sleep(random.uniform(0.5, 2))
 
                 # Click send button
-                send_btn = await self._page.query_selector('button[aria-label*="Send"], svg[aria-label*="Send"]')
+                send_btn = await self._page.query_selector(
+                    'button[aria-label*="Send"], svg[aria-label*="Send"]'
+                )
                 if send_btn:
                     await send_btn.click()
 
@@ -358,7 +378,9 @@ class FacebookAdapter(PlatformAdapter):
         """Navigate to Messenger and handle the landing/continuation page."""
         assert self._page is not None
 
-        await self._page.goto('https://www.messenger.com/', wait_until='domcontentloaded', timeout=60000)
+        await self._page.goto(
+            "https://www.messenger.com/", wait_until="domcontentloaded", timeout=60000
+        )
         await asyncio.sleep(5)
 
         # Check if we landed on the promotional/landing page
@@ -368,7 +390,8 @@ class FacebookAdapter(PlatformAdapter):
         # Try clicking "Continue as..." button/link
         for attempt in range(3):
             continue_btn = await self._page.query_selector(
-                'a[href*="/t/"], [role="button"]:has-text("Tiếp tục"), [role="button"]:has-text("Continue"), '
+                'a[href*="/t/"], [role="button"]:has-text("Tiếp tục"), '
+                '[role="button"]:has-text("Continue"), '
                 'a:has-text("Tiếp tục"), a:has-text("Continue")'
             )
             if continue_btn:
@@ -379,7 +402,7 @@ class FacebookAdapter(PlatformAdapter):
                     url = self._page.url
                     logger.info("Facebook: URL after click: %s", url)
                     # Check if we're now in the app
-                    if '/t/' in url or '/e2ee/' in url:
+                    if "/t/" in url or "/e2ee/" in url:
                         break
                 except Exception as e:
                     logger.warning("Click failed: %s", e)
@@ -389,9 +412,11 @@ class FacebookAdapter(PlatformAdapter):
 
         # Final check - if still on landing page, try direct inbox URL
         url = self._page.url
-        if 'messenger.com/t' not in url and 'messenger.com/e2ee' not in url:
+        if "messenger.com/t" not in url and "messenger.com/e2ee" not in url:
             logger.info("Facebook: still on landing page, trying direct inbox navigation")
-            await self._page.goto('https://www.messenger.com/inbox/', wait_until='domcontentloaded', timeout=60000)
+            await self._page.goto(
+                "https://www.messenger.com/inbox/", wait_until="domcontentloaded", timeout=60000
+            )
             await asyncio.sleep(5)
 
         logger.info("Facebook: final Messenger URL: %s", self._page.url)
@@ -413,13 +438,23 @@ class FacebookAdapter(PlatformAdapter):
                     current_url = self._page.url
 
                     # Every 3 polls or if we're not on inbox, navigate back to refresh
-                    if poll_count % 3 == 0 or '/e2ee/' in current_url:
-                        logger.debug("Facebook: refreshing inbox (poll #%d, url=%s)", poll_count, current_url[:60])
+                    if poll_count % 3 == 0 or "/e2ee/" in current_url:
+                        logger.debug(
+                            "Facebook: refreshing inbox (poll #%d, url=%s)",
+                            poll_count,
+                            current_url[:60],
+                        )
                         try:
-                            await self._page.goto('https://www.messenger.com/', wait_until='domcontentloaded', timeout=30000)
+                            await self._page.goto(
+                                "https://www.messenger.com/",
+                                wait_until="domcontentloaded",
+                                timeout=30000,
+                            )
                             await asyncio.sleep(3)
                             # Re-click continue if needed
-                            btn = await self._page.query_selector('a[href*="/t/"], a:has-text("Tiếp tục"), a:has-text("Continue")')
+                            btn = await self._page.query_selector(
+                                'a[href*="/t/"], a:has-text("Tiếp tục"), a:has-text("Continue")'
+                            )
                             if btn:
                                 await btn.click()
                                 await asyncio.sleep(5)
@@ -435,7 +470,9 @@ class FacebookAdapter(PlatformAdapter):
                             items = await self._page.query_selector_all(sel)
                             if items:
                                 unread_convs.extend(items)
-                                logger.info("Facebook: found %d unread via selector '%s'", len(items), sel)
+                                logger.info(
+                                    "Facebook: found %d unread via selector '%s'", len(items), sel
+                                )
                                 break
                         except Exception:
                             continue
@@ -443,28 +480,37 @@ class FacebookAdapter(PlatformAdapter):
                     # Strategy 2: Look for conversation links in sidebar with unread badge/dot
                     if not unread_convs:
                         try:
-                            links = await self._page.query_selector_all('a[href*="/t/"], a[href*="/e2ee/"]')
+                            links = await self._page.query_selector_all(
+                                'a[href*="/t/"], a[href*="/e2ee/"]'
+                            )
                             for link in links[:20]:
-                                html = await link.inner_html()
-                                parent = await link.evaluate_handle('el => el.closest("[role]") || el.parentElement')
-                                parent_html = await parent.evaluate('el => el.innerHTML')
+                                parent = await link.evaluate_handle(
+                                    'el => el.closest("[role]") || el.parentElement'
+                                )
+                                parent_html = await parent.evaluate("el => el.innerHTML")
                                 # Check for unread indicators in the conversation item
-                                has_unread = any(kw in parent_html.lower() for kw in [
-                                    'unread', 'aria-label="unread"',
-                                    'background-color: rgb(0, 132, 255)',  # blue dot
-                                    'background-color:rgb(0,132,255)',
-                                ])
+                                has_unread = any(
+                                    kw in parent_html.lower()
+                                    for kw in [
+                                        "unread",
+                                        'aria-label="unread"',
+                                        "background-color: rgb(0, 132, 255)",  # blue dot
+                                        "background-color:rgb(0,132,255)",
+                                    ]
+                                )
                                 # Also check for bold text (unread conversations are bold)
-                                has_bold = '<b>' in parent_html or 'font-weight' in parent_html
+                                has_bold = "<b>" in parent_html or "font-weight" in parent_html
                                 if has_unread or has_bold:
                                     unread_convs.append(link)
                             if unread_convs:
-                                logger.info("Facebook: found %d unread via link scanning", len(unread_convs))
+                                logger.info(
+                                    "Facebook: found %d unread via link scanning", len(unread_convs)
+                                )
                         except Exception as e:
                             logger.debug("Facebook: link scanning error: %s", e)
 
                     # Strategy 3: Check if currently viewing a conversation with new messages
-                    if not unread_convs and ('/t/' in current_url or '/e2ee/' in current_url):
+                    if not unread_convs and ("/t/" in current_url or "/e2ee/" in current_url):
                         try:
                             msg_elements = await self._page.query_selector_all('div[dir="auto"]')
                             if msg_elements:
@@ -475,20 +521,32 @@ class FacebookAdapter(PlatformAdapter):
                                         texts.append(t)
                                 if texts:
                                     latest = texts[-1]
-                                    sender_el = await self._page.query_selector('[role="heading"] span, h2 span')
-                                    sender = (await sender_el.inner_text()).strip() if sender_el else "Unknown"
+                                    sender_el = await self._page.query_selector(
+                                        '[role="heading"] span, h2 span'
+                                    )
+                                    sender = (
+                                        (await sender_el.inner_text()).strip()
+                                        if sender_el
+                                        else "Unknown"
+                                    )
                                     msg_key = f"{sender}:{latest}"
                                     if msg_key not in seen_messages:
                                         seen_messages.add(msg_key)
                                         if len(seen_messages) > 500:
                                             seen_messages.clear()
-                                        logger.info("Facebook: message in current chat from %s: %s", sender, latest[:50])
-                                        await callback({
-                                            "sender_id": sender,
-                                            "sender_name": sender,
-                                            "text": latest,
-                                            "timestamp": datetime.now().isoformat(),
-                                        })
+                                        logger.info(
+                                            "Facebook: message in current chat from %s: %s",
+                                            sender,
+                                            latest[:50],
+                                        )
+                                        await callback(
+                                            {
+                                                "sender_id": sender,
+                                                "sender_name": sender,
+                                                "text": latest,
+                                                "timestamp": datetime.now().isoformat(),
+                                            }
+                                        )
                         except Exception as e:
                             logger.debug("Facebook: current chat check error: %s", e)
 
@@ -499,7 +557,11 @@ class FacebookAdapter(PlatformAdapter):
                             await self._human_delay(2.0, 4.5)
 
                             sender = "Unknown"
-                            for header_sel in ['[role="heading"] span', 'h2 span', 'span[dir="auto"]']:
+                            for header_sel in [
+                                '[role="heading"] span',
+                                "h2 span",
+                                'span[dir="auto"]',
+                            ]:
                                 try:
                                     header = await self._page.query_selector(header_sel)
                                     if header:
@@ -528,19 +590,28 @@ class FacebookAdapter(PlatformAdapter):
                                     seen_messages.add(msg_key)
                                     if len(seen_messages) > 500:
                                         seen_messages.clear()
-                                    logger.info("Facebook new message from %s: %s", sender, latest[:50])
-                                    await callback({
-                                        "sender_id": sender,
-                                        "sender_name": sender,
-                                        "text": latest,
-                                        "timestamp": datetime.now().isoformat(),
-                                    })
+                                    logger.info(
+                                        "Facebook new message from %s: %s", sender, latest[:50]
+                                    )
+                                    await callback(
+                                        {
+                                            "sender_id": sender,
+                                            "sender_name": sender,
+                                            "text": latest,
+                                            "timestamp": datetime.now().isoformat(),
+                                        }
+                                    )
 
                         except Exception as e:
                             logger.warning("Error processing unread conversation: %s", e)
 
                     if poll_count % 6 == 0:
-                        logger.info("Facebook: poll #%d complete, seen=%d msgs, url=%s", poll_count, len(seen_messages), self._page.url[:60])
+                        logger.info(
+                            "Facebook: poll #%d complete, seen=%d msgs, url=%s",
+                            poll_count,
+                            len(seen_messages),
+                            self._page.url[:60],
+                        )
 
                 except Exception as e:
                     logger.warning("Error in Facebook message listener: %s", e)
@@ -561,7 +632,7 @@ class FacebookAdapter(PlatformAdapter):
 
         try:
             profile_url = f"https://www.facebook.com/{user_id}"
-            await self._page.goto(profile_url, wait_until='networkidle')
+            await self._page.goto(profile_url, wait_until="networkidle")
 
             # Extract profile information
             name_elem = await self._page.query_selector('h1, span[dir="auto"]')
@@ -571,7 +642,7 @@ class FacebookAdapter(PlatformAdapter):
             bio = await bio_elem.inner_text() if bio_elem else None
 
             avatar_elem = await self._page.query_selector('img[alt*="Avatar"]')
-            avatar_url = await avatar_elem.get_attribute('src') if avatar_elem else None
+            avatar_url = await avatar_elem.get_attribute("src") if avatar_elem else None
 
             return UserProfile(
                 user_id=user_id,
@@ -591,30 +662,38 @@ class FacebookAdapter(PlatformAdapter):
 
         try:
             members_url = f"https://www.facebook.com/groups/{group_id}/members"
-            await self._page.goto(members_url, wait_until='networkidle')
+            await self._page.goto(members_url, wait_until="networkidle")
 
             # Scroll to load members
             for _ in range(5):
-                await self._page.evaluate('window.scrollBy(0, 800)')
+                await self._page.evaluate("window.scrollBy(0, 800)")
                 await asyncio.sleep(random.uniform(1, 2))
 
             # Extract member information
-            member_elements = await self._page.query_selector_all('[data-pagelet="MembersList::Member"]')
+            member_elements = await self._page.query_selector_all(
+                '[data-pagelet="MembersList::Member"]'
+            )
 
             for member_elem in member_elements[:limit]:
                 try:
-                    link = await member_elem.query_selector('a')
-                    href = await link.get_attribute('href') if link else ""
-                    user_id = href.split('/profile.php?id=')[1].split('&')[0] if 'profile.php?id=' in href else ""
+                    link = await member_elem.query_selector("a")
+                    href = await link.get_attribute("href") if link else ""
+                    user_id = (
+                        href.split("/profile.php?id=")[1].split("&")[0]
+                        if "profile.php?id=" in href
+                        else ""
+                    )
 
                     name_elem = await member_elem.query_selector('span[dir="auto"]')
                     name = await name_elem.inner_text() if name_elem else "Unknown"
 
                     if user_id:
-                        members.append(UserProfile(
-                            user_id=user_id,
-                            display_name=name.strip(),
-                        ))
+                        members.append(
+                            UserProfile(
+                                user_id=user_id,
+                                display_name=name.strip(),
+                            )
+                        )
                 except Exception as e:
                     logger.warning("Failed to extract member: %s", e)
                     continue
@@ -648,6 +727,7 @@ class FacebookAdapter(PlatformAdapter):
         import json
         import os
         import time
+
         cookie_file = f"sessions/{self._session_name}_cookies.json"
         if not os.path.exists(cookie_file):
             return {"valid": False, "message": "Cookie 文件不存在，请先登录", "details": {}}
@@ -677,7 +757,12 @@ class FacebookAdapter(PlatformAdapter):
                 return {
                     "valid": False,
                     "message": "核心 Cookie 已过期，请重新登录",
-                    "details": {"key_cookies": key_cookies, "total": total, "expired_count": expired_count, "hours_since_save": round(hours_since_save, 1)},
+                    "details": {
+                        "key_cookies": key_cookies,
+                        "total": total,
+                        "expired_count": expired_count,
+                        "hours_since_save": round(hours_since_save, 1),
+                    },
                 }
             days_left = c_user.get("days_left")
             msg = f"Cookie 有效 (共{total}个, {expired_count}个已过期)"
@@ -688,7 +773,12 @@ class FacebookAdapter(PlatformAdapter):
             return {
                 "valid": True,
                 "message": msg,
-                "details": {"key_cookies": key_cookies, "total": total, "expired_count": expired_count, "hours_since_save": round(hours_since_save, 1)},
+                "details": {
+                    "key_cookies": key_cookies,
+                    "total": total,
+                    "expired_count": expired_count,
+                    "hours_since_save": round(hours_since_save, 1),
+                },
             }
         except Exception as e:
             return {"valid": False, "message": f"检测失败: {e}", "details": {"error": str(e)}}

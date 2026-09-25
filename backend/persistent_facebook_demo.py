@@ -63,6 +63,7 @@ class WSBridge:
     async def connect(self):
         try:
             import websockets
+
             self.ws = await websockets.connect(self.url)
             self.connected = True
             logger.info("🔗 WebSocket bridge connected to %s", self.url)
@@ -154,16 +155,18 @@ class PersistentFacebookBot:
 
         logger.info("📨 Received from %s (%s): %s", sender_name, sender_id, text[:50])
 
-        await self.ws_bridge.send({
-            "type": "telegram_message",
-            "direction": "inbound",
-            "account": SESSION_NAME,
-            "sender_id": sender_id,
-            "sender_name": sender_name,
-            "content": text,
-            "timestamp": datetime.now().isoformat(),
-            "platform": "facebook",
-        })
+        await self.ws_bridge.send(
+            {
+                "type": "telegram_message",
+                "direction": "inbound",
+                "account": SESSION_NAME,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "content": text,
+                "timestamp": datetime.now().isoformat(),
+                "platform": "facebook",
+            }
+        )
 
         response, _ = await self.generate_response(text, sender_id, CATEGORY)
 
@@ -172,16 +175,18 @@ class PersistentFacebookBot:
 
         if sent:
             logger.info("💬 Replied: %s", response[:100])
-            await self.ws_bridge.send({
-                "type": "telegram_message",
-                "direction": "outbound",
-                "account": SESSION_NAME,
-                "sender_id": sender_id,
-                "sender_name": sender_name,
-                "content": response,
-                "timestamp": datetime.now().isoformat(),
-                "platform": "facebook",
-            })
+            await self.ws_bridge.send(
+                {
+                    "type": "telegram_message",
+                    "direction": "outbound",
+                    "account": SESSION_NAME,
+                    "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "content": response,
+                    "timestamp": datetime.now().isoformat(),
+                    "platform": "facebook",
+                }
+            )
         else:
             logger.error("❌ Failed to send reply")
 

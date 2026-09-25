@@ -14,6 +14,7 @@ from app.models.models import (
 
 # ── Task Schemas ──────────────────────────────────────
 
+
 class TaskCreate(BaseModel):
     name: str = Field(min_length=1, max_length=300)
     platform: Platform
@@ -38,6 +39,7 @@ class TaskResponse(BaseModel):
 
 
 # ── Conversation Schemas ──────────────────────────────
+
 
 class MessageResponse(BaseModel):
     id: uuid.UUID
@@ -65,6 +67,7 @@ class ConversationResponse(BaseModel):
 
 
 # ── Intelligence Schemas ──────────────────────────────
+
 
 class IntelligenceResponse(BaseModel):
     id: uuid.UUID
