@@ -219,7 +219,11 @@ export async function fetchAPI<T = any>(
       throw new Error(`请求超时（${timeout}ms）：${url}`);
     }
     if (error instanceof TypeError) {
-      throw new Error('无法连接后端服务，请确认 API 已启动');
+      // 浏览器的 fetch 在"连不上"和"响应被拦截（如缺少跨域头）"两种情况下
+      // 都会抛 TypeError，这里把可能性都提示出来，避免误导成单一原因
+      throw new Error(
+        '无法读取后端响应：可能是 API 未启动，也可能是响应被浏览器拦截（跨域）。请查看后端日志 api.err',
+      );
     }
     throw error;
   } finally {

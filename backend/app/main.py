@@ -5,8 +5,9 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from app.api.routes import router as api_router
@@ -14,6 +15,9 @@ from app.core.config import settings
 from app.core.database import async_session_factory
 
 logger = logging.getLogger(__name__)
+
+# 前端可能用 localhost 或 127.0.0.1 打开，两个来源都要放行
+ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
 
 async def persist_message(message: dict):
@@ -198,13 +202,32 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    # 前端用 localhost:3000 或 127.0.0.1:3000 打开都要能连上；
-    # 只放行其中一个时，另一个来源的请求会被浏览器拦掉，页面显示"后端不可达"
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """未处理异常也要带上跨域头，否则前端只能看到一句误导性的"无法连接后端服务"。
+
+    Starlette 的 ServerErrorMiddleware 位于中间件栈的最外层，它生成的 500 响应
+    不会经过 CORSMiddleware，因此不带 Access-Control-Allow-Origin。浏览器于是把
+    这个响应当作跨域失败丢弃，前端的 fetch 抛 TypeError，只能提示"后端不可达"，
+    真正的异常（例如 sqlite3.OperationalError）就被掩盖了。这里手工补上跨域头，
+    并把异常信息返回给前端，便于定位问题。
+    """
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    origin = request.headers.get("origin")
+    headers = {"Access-Control-Allow-Origin": origin} if origin in ALLOWED_ORIGINS else None
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+        headers=headers,
+    )
+
 
 app.include_router(api_router, prefix="/api/v1")
 
