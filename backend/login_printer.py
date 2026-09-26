@@ -8,6 +8,7 @@ import asyncio
 from telethon import TelegramClient
 
 from app.core.config import settings
+from app.core.proxy import telegram_proxy
 from app.core.session_paths import ensure_session_dir
 
 SESSION_NAME = "sessions/printer"
@@ -27,7 +28,7 @@ async def main():
             SESSION_NAME,
             settings.tg_api_id,
             settings.tg_api_hash,
-            proxy=("http", "127.0.0.1", 7890),
+            proxy=telegram_proxy(),
         )
         print("✅ Using proxy at 127.0.0.1:7890")
     except Exception as e:

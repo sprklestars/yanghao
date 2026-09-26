@@ -35,6 +35,8 @@
 
 **2026-09-25 这批改动（在 `setup-and-fixes` 分支）**：修复依赖安装与打包配置、修复 4 个真实 bug（CORS 白名单、会话结束端点的三种错误、TG 会话检测属性名）、**删除前端全部演示数据与降级逻辑**（现在空列表就是空列表，只有真连不上才报"后端不可达"）、ruff 从 360 项清零、单测从 14 个补到 53 个。
 
+**2026-09-26 这批改动**：修掉几个「连不上 Telegram / 账号列表乱显示」的真因——① 补上 Telethon 走代理所需的 `python-socks[asyncio]`（缺失时报 `No module named 'socks'`）；② 把各调用点写死的 `('http', '127.0.0.1', 7890)` 改成 `.env` 的 `TG_PROXY_URL`（本机 7890 实际只认 SOCKS5，按 HTTP 连会一直报 `Connection to Telegram failed N time(s)`）；③ 新增 `Settings.telegram_credentials_error()` 前置校验，把 `api_id/api_hash` 误填（手机号、示例占位值、hash 长度不对）从英文报错变成中文提示，并把 `env_file` 固定为 `backend/.env` 的绝对路径；④ 新增 `app/core/session_paths.py`（构造 `TelegramClient` 前保证 `sessions/` 存在），并清理「登录失败留下的空会话」——`test-connection` 改用内存会话、`send-code`/`verify-code` 失败时删除本次新建的 `.session`，不再让账号列表凭空多出账号。单测 53 → 78。
+
 ---
 
 ## 3. 技术栈
@@ -199,6 +201,8 @@ IDLE → VERIFICATION → GREETING → PROBING → EXTRACTION → EXIT
 > DB 里存的是枚举**成员名**（如 `TELEGRAM`、`GREEN`），SQLAlchemy 层也接受 `.value`；手写 SQL 查询时要按成员名来。
 >
 > 另一处「真源」是 `backend/sessions/`：账号列表并不查库，而是**扫描会话文件**——TG `{name}.session`、FB `{name}_cookies.json`、Zalo `{name}_zalo.json`，元数据在同名 `_meta.json`。
+>
+> ⚠️ 因为 Telethon **一构造客户端就会建 `.session` 文件**，登录失败也会留下空壳，而账号列表只看文件存在与否——所以失败的空会话会被显示成一个（还标着"健康"的）账号。为此 `test-connection` 在没有同名会话时改用 `MemorySession`，`send-code` / `verify-code` 失败时会删掉本次新建的会话文件（`app/core/session_paths.remove_session_files`）。手工清理走前端垃圾桶按钮（`DELETE /accounts/{id}`）。
 
 ---
 
@@ -280,7 +284,15 @@ mypy .
 
 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL`、`TG_API_ID` / `TG_API_HASH`、`DATABASE_URL`（异步，`postgresql+asyncpg://`）/ `DATABASE_URL_SYNC`（`postgresql://`）、`REDIS_URL`、`SECRET_KEY`、`ACCESS_TOKEN_EXPIRE_MINUTES`、`APP_ENV`、`LOG_LEVEL`。
 
-**硬编码的代理**：`('http', '127.0.0.1', 7890)` 出现在 `routes.py`（`TG_PROXY`）、`quick_login.py`、`persistent_chat_demo.py`、`live_chat_demo.py` 等。本机不跑这个代理时，Telegram 相关功能全部连不上——这是最常见的「连接超时」原因。适配器类本身支持传入代理，只是各调用点写死了。
+**Telegram 代理**：统一从 `.env` 的 `TG_PROXY_URL` 读取（`app/core/proxy.py` 解析成 Telethon 的 `proxy` 参数），默认 `socks5://127.0.0.1:7890`，**留空即直连**。`routes.py` 的 `TG_PROXY`、`quick_login.py`、`login_printer.py`、`persistent_chat_demo.py`、`live_chat_demo.py` 都走它，不再各写各的。
+
+**协议必须与代理软件实际监听的协议一致**：把 SOCKS5 端口当 `http://` 用时，python-socks 抛 `ProxyError: Invalid proxy response`，Telethon 只会笼统地报 `Connection to Telegram failed N time(s)`（本机 7890 实测是 SOCKS5，不是 HTTP，改成 `socks5://` 后连接成功）。本机不跑这个代理时，Telegram 相关功能全部连不上——这是最常见的「连接超时」原因。
+
+代理实现本身还需要 `python-socks[asyncio]`（已声明在 `backend/pyproject.toml`）：Telethon 会先 `import python_socks`，失败才回落到 `import socks`(PySocks)，两者都缺失时报的是 **`No module named 'socks'`**——看到这条错误别只想着装 PySocks，装上 `python-socks[asyncio]` 即可。注意 `python_socks` 是在 `telethon.network.connection.connection` 导入时探测的，**装完依赖必须重启后端进程**才会生效。
+
+**TG_API_ID / TG_API_HASH 必须成对且格式正确**：`TG_API_ID` 是 my.telegram.org 上 App 的 `api_id`（通常 7-9 位数字），**不是手机号**；`TG_API_HASH` 是 32 位十六进制字符串。填错时网络其实是通的，Telethon 只会报 `The api_id/api_hash combination is invalid (caused by SendCodeRequest)`。`Settings.telegram_credentials_error()`（`app/core/config.py`）会在「测试连接 / 发送验证码」前先给出中文提示；该文件还把 `env_file` 固定成 `backend/.env` 的绝对路径，所以从仓库根目录启动 uvicorn 也不会读不到配置。
+
+文档、`.env.example` 里出现过的示例值（`1234567` / `12345678` / `0123456789abcdef0123456789abcdef` / `your-telegram-api-hash`）也会被 `telegram_credentials_error()` 单独识别并提示——这些占位串**最容易被直接照抄**，且格式恰好合法，只会在发验证码时才被 Telegram 拒绝。另注意「测试连接」按钮只验证网络与代理（不会校验凭证），真正校验 `api_id/api_hash` 的是发验证码那一步，所以它的成功提示里明确写了这一点。
 
 **绝不提交**：`backend/.env`、`backend/sessions/**`。`.gitignore` 已覆盖 `.env`、`sessions/`、`*.session`、`*.session-journal`、`logs/`。历史上曾有硬编码数据库凭证被清理（commit `6bd4c98`），改动时别再引入。
 

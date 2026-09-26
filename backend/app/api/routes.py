@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.core.session_paths import SESSION_DIR, ensure_session_dir
+from app.core.proxy import telegram_proxy
+from app.core.session_paths import SESSION_DIR, ensure_session_dir, remove_session_files
 from app.models.models import (
     Conversation,
     ConversationState,
@@ -41,7 +42,8 @@ def _get_manager():
     return manager
 
 
-TG_PROXY = ("http", "127.0.0.1", 7890)
+# 来自 .env 的 TG_PROXY_URL；协议/端口写错时这里会拿到错误配置。
+TG_PROXY = telegram_proxy()
 
 
 @router.get("/accounts")
@@ -285,23 +287,55 @@ async def check_session(account_id: str):
 
 # ── Account Login Flow ─────────────────────────────────
 
-_pending_logins: dict[str, object] = {}
+_pending_logins: dict[str, dict] = {}
+
+
+async def _safe_disconnect(client) -> None:
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+
+
+def _discard_failed_session(session_name: str, existed_before: bool) -> None:
+    """登录没成功时删掉本次新建的空会话文件，别让它出现在账号列表里。"""
+    if existed_before:
+        return
+    removed = remove_session_files(SESSION_DIR / session_name)
+    if removed:
+        logger.info("已清理未完成的会话文件: %s", ", ".join(p.name for p in removed))
 
 
 @router.post("/accounts/telegram/test-connection")
 async def telegram_test_connection(body: dict):
     """Test Telegram connectivity without sending any code."""
     from telethon import TelegramClient
+    from telethon.sessions import MemorySession
 
     from app.core.config import settings
 
     session_name = body.get("session_name", "").strip() or "test_connection"
+
+    problem = settings.telegram_credentials_error()
+    if problem:
+        return {"status": "error", "connected": False, "authorized": False, "message": problem}
+
     session_path = str(SESSION_DIR / session_name)
-    # Telethon 在构造时就要写 .session 文件，目录不存在会抛 sqlite3 错误。
-    ensure_session_dir(session_path)
-    client = TelegramClient(
-        session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, proxy=TG_PROXY
-    )
+    if (SESSION_DIR / f"{session_name}.session").exists():
+        # Telethon 在构造时就要写 .session 文件，目录不存在会抛 sqlite3 错误。
+        ensure_session_dir(session_path)
+        client = TelegramClient(
+            session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, proxy=TG_PROXY
+        )
+    else:
+        # 用内存会话：否则每点一次「测试连接」都会在 sessions/ 留一个空会话文件，
+        # 而账号列表是扫描该目录的，会凭空多出一个「账号」。
+        client = TelegramClient(
+            MemorySession(),
+            api_id=settings.tg_api_id,
+            api_hash=settings.tg_api_hash,
+            proxy=TG_PROXY,
+        )
 
     try:
         await client.connect()
@@ -310,24 +344,25 @@ async def telegram_test_connection(body: dict):
         if is_authorized:
             me = await client.get_me()
         await client.disconnect()
+        if me:
+            who = getattr(me, "username", "") or getattr(me, "first_name", "") or "Unknown"
+            message = f"连接成功，已登录: @{who}"
+        else:
+            # 这一步只证明网络/代理通了：Telegram 直到发验证码时才校验 api_id/api_hash，
+            # 别让用户以为「测试连接通过 = 凭证也没问题」。
+            message = (
+                "网络与代理连接成功（该会话尚未登录；"
+                "api_id/api_hash 要到发验证码时才会被校验）"
+            )
         return {
             "status": "ok",
             "connected": True,
             "authorized": is_authorized,
             "username": (getattr(me, "username", None) or None) if me else None,
-            "message": "连接成功"
-            + (
-                "，已登录: @"
-                + (getattr(me, "username", "") or getattr(me, "first_name", "") or "Unknown")
-                if me
-                else ""
-            ),
+            "message": message,
         }
     except Exception as e:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _safe_disconnect(client)
         return {
             "status": "error",
             "connected": False,
@@ -346,6 +381,10 @@ async def telegram_send_code(body: dict):
 
     from app.core.config import settings
 
+    problem = settings.telegram_credentials_error()
+    if problem:
+        raise HTTPException(400, problem)
+
     phone = body.get("phone", "").strip()
     session_name = body.get("session_name", "").strip()
     if not phone or not session_name:
@@ -355,6 +394,7 @@ async def telegram_send_code(body: dict):
         phone = "+" + phone
 
     session_path = str(SESSION_DIR / session_name)
+    session_existed = (SESSION_DIR / f"{session_name}.session").exists()
     ensure_session_dir(session_path)
     client = TelegramClient(
         session_path, api_id=settings.tg_api_id, api_hash=settings.tg_api_hash, proxy=TG_PROXY
@@ -369,25 +409,19 @@ async def telegram_send_code(body: dict):
                 "client": client,
                 "phone": phone,
                 "phone_code_hash": result.phone_code_hash,
+                "session_existed": session_existed,
             }
             return {"status": "code_sent", "session_name": session_name}
         except FloodWaitError as e:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            await _safe_disconnect(client)
+            _discard_failed_session(session_name, session_existed)
             raise HTTPException(429, f"请求过于频繁，请等待 {e.seconds} 秒后再试")
         except PhoneNumberInvalidError:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            await _safe_disconnect(client)
+            _discard_failed_session(session_name, session_existed)
             raise HTTPException(400, "手机号格式无效，请使用国际格式如 +84xxxxxxxxx")
         except ConnectionError as e:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            await _safe_disconnect(client)
             if attempt < max_retries - 1:
                 await asyncio.sleep(2)
                 client = TelegramClient(
@@ -397,15 +431,15 @@ async def telegram_send_code(body: dict):
                     proxy=TG_PROXY,
                 )
                 continue
+            _discard_failed_session(session_name, session_existed)
             raise HTTPException(400, f"无法连接到Telegram服务器，请检查网络/代理设置: {e}")
         except Exception as e:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            await _safe_disconnect(client)
             err_str = str(e)
             if "flood" in err_str.lower():
+                _discard_failed_session(session_name, session_existed)
                 raise HTTPException(429, "请求过于频繁，请稍后再试")
+            _discard_failed_session(session_name, session_existed)
             raise HTTPException(400, f"发送验证码失败: {err_str}")
 
 
@@ -452,7 +486,11 @@ async def telegram_verify_code(body: dict):
             or "PhoneCodeExpired" in error_msg
         ):
             del _pending_logins[session_name]
+            await _safe_disconnect(client)
+            _discard_failed_session(session_name, bool(pending.get("session_existed", True)))
             raise HTTPException(400, f"验证码无效或已过期，请重新发送: {error_msg}")
+        await _safe_disconnect(client)
+        _discard_failed_session(session_name, bool(pending.get("session_existed", True)))
         raise HTTPException(400, f"验证失败: {error_msg}")
 
 

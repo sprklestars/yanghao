@@ -84,5 +84,26 @@ class RealTelethonClientTests(unittest.TestCase):
                 client.session.close()
 
 
+class RemoveSessionFilesTests(unittest.TestCase):
+    def test_removes_session_and_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "sessions" / "t"
+            base.parent.mkdir(parents=True)
+            Path(f"{base}.session").write_bytes(b"x")
+            Path(f"{base}.session-journal").write_bytes(b"x")
+
+            removed = session_paths.remove_session_files(base)
+
+            self.assertEqual(
+                sorted(path.name for path in removed), ["t.session", "t.session-journal"]
+            )
+            self.assertFalse(Path(f"{base}.session").exists())
+            self.assertFalse(Path(f"{base}.session-journal").exists())
+
+    def test_missing_files_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(session_paths.remove_session_files(Path(tmp) / "nope"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

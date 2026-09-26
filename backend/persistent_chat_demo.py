@@ -28,13 +28,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 from telethon import TelegramClient, events
 
 from app.core.config import settings
+from app.core.proxy import telegram_proxy
 from app.core.session_paths import ensure_session_dir
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
 
 # 配置
 SESSION_NAME = "sessions/printer"
-PROXY = ("http", "127.0.0.1", 7890)
+PROXY = telegram_proxy()
 
 PERSONA_PRESETS = {
     "designer": {

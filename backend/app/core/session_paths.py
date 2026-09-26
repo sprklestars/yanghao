@@ -29,3 +29,25 @@ def ensure_session_dir(session_path: str | Path | None = None) -> Path:
         directory = Path(str(session_path)).expanduser().parent
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def remove_session_files(session_path: str | Path) -> list[Path]:
+    """删除 Telethon 为某个会话名写出的文件（``.session`` 与 ``.session-journal``）。
+
+    参数是 ``backend/sessions/<name>`` 这种不含 ``.session`` 后缀的路径。
+    只用于清理「刚新建、但登录没成功」的会话：Telethon 构造客户端时就会建好
+    ``.session`` 文件，失败也会留个空壳，而账号列表是直接扫描 ``sessions/`` 目录的，
+    会把这个空壳显示成一个真实账号。
+    """
+    base = Path(str(session_path))
+    removed: list[Path] = []
+    for suffix in (".session", ".session-journal"):
+        path = Path(f"{base}{suffix}")
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed.append(path)
+    return removed

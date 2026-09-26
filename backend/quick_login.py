@@ -9,6 +9,7 @@ from pathlib import Path
 from telethon import TelegramClient
 
 from app.core.config import Settings
+from app.core.proxy import telegram_proxy
 
 BACKEND_DIR = Path(__file__).resolve().parent
 SESSION_DIR = BACKEND_DIR / "sessions"
@@ -42,7 +43,7 @@ async def login_account(name: str, settings: Settings) -> bool:
         str(SESSION_DIR / name),
         settings.tg_api_id,
         settings.tg_api_hash,
-        proxy=("http", "127.0.0.1", 7890),
+        proxy=telegram_proxy(),
         timeout=10,
         connection_retries=2,
     )

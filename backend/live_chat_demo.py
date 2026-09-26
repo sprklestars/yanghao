@@ -25,6 +25,7 @@ from datetime import datetime
 from telethon import TelegramClient, events
 
 from app.core.config import settings
+from app.core.proxy import telegram_proxy
 from app.core.session_paths import ensure_session_dir
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
@@ -34,7 +35,8 @@ from app.services.security.account_warming import warming_manager
 SESSION_NAME = "sessions/printer"
 
 # 代理配置(如果需要)
-PROXY = ("http", "127.0.0.1", 7890)  # (类型, 主机, 端口)
+# 代理来自 .env 的 TG_PROXY_URL（(类型, 主机, 端口) 由 app/core/proxy.py 解析）
+PROXY = telegram_proxy()
 
 # Persona配置
 PERSONA_CONFIG = {
