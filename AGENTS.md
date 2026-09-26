@@ -383,6 +383,8 @@ mypy .
 
 22. **任务定时调度（P2-6）**：调度只存 `task.config["schedule"]`（`enabled` / `mode` / `at` 或 `every_minutes` / `next_run_at` / `last_run_at` / `last_skipped_reason`），**不新增数据表**；纯计算在 `app/services/scheduling.py`（`normalize_schedule` 校验、`compute_next_run` 算下次时间，`daily` 按本机时区解释 HH:MM），有单测。Celery Beat 每分钟跑 `scan_task_schedules`：到点→标记 RUNNING 并 `run_task.delay`；`status==RUNNING` 或常驻在线服务在跑→本轮跳过并顺延。`PUT /tasks/{id}/schedule` 保存配置并自动拉起 worker + beat；前端任务行有「⏰ 定时」编辑器与下次运行时间/上次跳过原因。注意：**beat 必须和 worker 一起跑**，只开 beat 不会执行任务。
 
+23. **情报审核闭环**：`PATCH /intelligence/{id}`（body `{review_status?, operator_notes?}`）改审核状态与备注，枚举校验走 `app/services/intelligence/review.py`（`parse_review_status` / `apply_review`，有单测）。规则：状态回到 `pending` 时清空 `reviewed_at`；其它状态只记**首次**审核时间（审计含义）；`operator_notes` 缺省不改动、传空串则清空。`IntelligenceResponse` 与前端类型加了 `reviewed_at`，导出 CSV/Excel 也带上 `operator_notes` / `reviewed_at`。前端情报页的状态列变成下拉（待审核/已审核/已通过/已拒绝，改动即时保存），新增「操作」列做备注的行内编辑。
+
 ---
 
 ## 12. 文档索引（均在仓库根目录）

@@ -153,6 +153,7 @@ export interface IntelligenceRecord {
   review_status: string;
   platforms?: string[] | null;
   operator_notes?: string | null;
+  reviewed_at?: string | null;
   last_seen?: string | null;
   collected_at: string;
 }

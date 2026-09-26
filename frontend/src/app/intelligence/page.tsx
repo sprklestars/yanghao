@@ -10,6 +10,10 @@ export default function IntelligencePage() {
   // 只有真的连不上后端才设置；没有情报记录是正常状态
   const [backendError, setBackendError] = useState('');
   const [filters, setFilters] = useState({ category: '', platform: '' });
+  // 审核：状态下拉即时保存；备注用行内编辑
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [noteEditId, setNoteEditId] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState('');
 
   async function loadRecords() {
     try {
@@ -39,6 +43,26 @@ export default function IntelligencePage() {
     } catch (e: any) {
       alert(`导出失败：${e?.message || '请检查后端服务'}`);
     }
+  }
+
+  async function updateReview(id: string, patch: Record<string, unknown>) {
+    setSavingId(id);
+    try {
+      await fetchAPI(`/intelligence/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      });
+      await loadRecords();
+    } catch (e: any) {
+      alert(`更新审核状态失败：${e?.message || '请检查后端服务'}`);
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  async function saveNotes(id: string) {
+    await updateReview(id, { operator_notes: noteDraft });
+    setNoteEditId(null);
   }
 
   return (
@@ -101,6 +125,7 @@ export default function IntelligencePage() {
             <th className="px-4 py-2">Confidence</th>
             <th className="px-4 py-2">Activity</th>
             <th className="px-4 py-2">Status</th>
+            <th className="px-4 py-2">操作</th>
             <th className="px-4 py-2">Collected</th>
           </tr>
         </thead>
@@ -127,12 +152,70 @@ export default function IntelligencePage() {
                   {r.activity_status}
                 </span>
               </td>
-              <td className="px-4 py-2 capitalize">{r.review_status}</td>
+              <td className="px-4 py-2">
+                <select
+                  value={r.review_status}
+                  disabled={savingId === r.id}
+                  onChange={(e) => updateReview(r.id, { review_status: e.target.value })}
+                  className="border rounded px-2 py-1 text-xs disabled:opacity-50"
+                >
+                  <option value="pending">待审核</option>
+                  <option value="reviewed">已审核</option>
+                  <option value="approved">已通过</option>
+                  <option value="rejected">已拒绝</option>
+                </select>
+                {r.operator_notes && (
+                  <div
+                    className="text-xs text-slate-500 mt-0.5 max-w-[180px] truncate"
+                    title={r.operator_notes}
+                  >
+                    📝 {r.operator_notes}
+                  </div>
+                )}
+              </td>
+              <td className="px-4 py-2 align-top">
+                {noteEditId === r.id ? (
+                  <div className="flex flex-col gap-1">
+                    <textarea
+                      rows={2}
+                      value={noteDraft}
+                      onChange={(e) => setNoteDraft(e.target.value)}
+                      placeholder="审核备注"
+                      className="border rounded px-2 py-1 text-xs w-48"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => saveNotes(r.id)}
+                        disabled={savingId === r.id}
+                        className="text-xs text-blue-600 hover:underline disabled:opacity-50"
+                      >
+                        保存
+                      </button>
+                      <button
+                        onClick={() => setNoteEditId(null)}
+                        className="text-xs text-slate-500 hover:underline"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setNoteEditId(r.id);
+                      setNoteDraft(r.operator_notes || '');
+                    }}
+                    className="text-xs text-blue-600 hover:underline"
+                  >
+                    📝 备注
+                  </button>
+                )}
+              </td>
               <td className="px-4 py-2">{new Date(r.collected_at).toLocaleString()}</td>
             </tr>
           ))}
           {loaded && records.length === 0 && (
-            <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500">No records found</td></tr>
+            <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-500">No records found</td></tr>
           )}
         </tbody>
       </table>

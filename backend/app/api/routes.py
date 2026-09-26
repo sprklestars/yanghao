@@ -1291,6 +1291,39 @@ async def end_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
 # ── Intelligence ──────────────────────────────────────
 
 
+@router.patch("/intelligence/{intel_id}", response_model=IntelligenceResponse)
+async def review_intelligence(intel_id: str, body: dict, db: AsyncSession = Depends(get_db)):
+    """审核一条情报：改审核状态（pending/reviewed/approved/rejected）与备注。"""
+    from datetime import datetime, timezone
+
+    from app.services.intelligence.review import apply_review, parse_review_status
+
+    try:
+        intel_uuid = uuid.UUID(str(intel_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="情报 ID 格式不正确")
+
+    record = (
+        await db.execute(select(IntelligenceRecord).where(IntelligenceRecord.id == intel_uuid))
+    ).scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Intelligence record not found")
+
+    status = record.review_status
+    if "review_status" in body:
+        try:
+            status = parse_review_status(body["review_status"])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # operator_notes 缺省表示不改动；显式传空串表示清空
+    notes = body.get("operator_notes") if "operator_notes" in body else None
+    apply_review(record, status, notes, datetime.now(timezone.utc))
+    await db.commit()
+    await db.refresh(record)
+    return record
+
+
 @router.get("/intelligence", response_model=IntelligenceListResponse)
 async def list_intelligence(
     task_id: str | None = None,

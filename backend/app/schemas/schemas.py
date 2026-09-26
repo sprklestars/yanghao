@@ -91,6 +91,7 @@ class IntelligenceResponse(BaseModel):
     review_status: ReviewStatus
     platforms: list[str] | None = None
     operator_notes: str | None
+    reviewed_at: datetime | None = None
     collected_at: datetime
 
     model_config = {"from_attributes": True}

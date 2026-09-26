@@ -54,6 +54,8 @@ def _intelligence_rows(records) -> list[dict]:
                 "bank_accounts": "、".join(business.get("bank_accounts") or []),
                 "activity_status": r.activity_status.value,
                 "review_status": r.review_status.value,
+                "operator_notes": r.operator_notes or "",
+                "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else "",
                 "last_seen": r.last_seen.isoformat() if r.last_seen else "",
                 "collected_at": r.collected_at.isoformat() if r.collected_at else "",
             }
