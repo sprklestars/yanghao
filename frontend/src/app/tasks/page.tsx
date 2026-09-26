@@ -1,13 +1,25 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { fetchAPI, wsClient, type Task } from '@/lib/api';
+import {
+  accountAPI,
+  fetchAPI,
+  serviceAPI,
+  wsClient,
+  type Account,
+  type ServiceStatus,
+  type Task,
+} from '@/lib/api';
 
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loaded, setLoaded] = useState(false);
   // 只有真的连不上后端才设置；没有任务是正常状态
   const [backendError, setBackendError] = useState('');
+  const [services, setServices] = useState<ServiceStatus[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  // 启动/停止的反馈走横幅，不再用 alert 阻塞页面（alert 会挡住列表刷新）
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [form, setForm] = useState({
     name: '',
     platform: 'telegram',
@@ -15,23 +27,45 @@ export default function TasksPage() {
     keywords: '',
     target_region: '',
   });
+  // 建任务时显式选账号（以前是后端自己挑，界面上只显示一句"将使用账号"）
+  const [taskAccount, setTaskAccount] = useState('');
 
   // Connect WebSocket on mount
   useEffect(() => {
+    loadTasks(); // 进页面先拉一次，不然列表/调度器状态要手动点刷新才出现
     wsClient.connect();
 
     wsClient.on('task_created', () => loadTasks());
     wsClient.on('task_started', () => loadTasks());
 
+    // 任务和服务的状态会自己变（worker 起停、任务跑完），定时兜底刷新
+    const timer = setInterval(loadTasks, 5000);
     return () => {
+      clearInterval(timer);
       wsClient.disconnect();
     };
   }, []);
 
+  const platformAccounts = accounts.filter((a) => a.platform === form.platform);
+
+  // 切换平台时，把账号选择重置为该平台下的第一个
+  useEffect(() => {
+    setTaskAccount((current) =>
+      platformAccounts.some((a) => a.id === current) ? current : platformAccounts[0]?.id || '',
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.platform, accounts]);
+
   async function loadTasks() {
     try {
-      const data = await fetchAPI('/tasks');
+      const [data, svc, accs] = await Promise.all([
+        fetchAPI('/tasks'),
+        serviceAPI.status(),
+        accountAPI.list(),
+      ]);
       setTasks(data || []);
+      setServices(svc || []);
+      setAccounts(accs || []);
       setLoaded(true);
       setBackendError('');
     } catch (error: any) {
@@ -51,25 +85,60 @@ export default function TasksPage() {
         body: JSON.stringify({
           ...form,
           keywords: form.keywords.split(',').map((k) => k.trim()).filter(Boolean),
+          config: taskAccount ? { account: taskAccount } : {},
         }),
       });
       setForm({ name: '', platform: 'telegram', category: 'private_investigator', keywords: '', target_region: '' });
       loadTasks();
     } catch (error) {
       console.error('Failed to create task:', error);
-      alert('创建任务失败,请检查后端服务');
+      setNotice({ kind: 'error', text: '创建任务失败，请检查后端服务' });
     }
   }
 
   async function startTask(taskId: string) {
     try {
-      await fetchAPI(`/tasks/${taskId}/start`, { method: 'POST' });
-      loadTasks();
-    } catch (error) {
+      const res = await fetchAPI<{ mode?: string }>(`/tasks/${taskId}/start`, { method: 'POST' });
+      await loadTasks();
+      setNotice({
+        kind: 'ok',
+        text:
+          res?.mode === 'celery'
+            ? '任务已提交给 Celery 调度器执行。'
+            : '任务已在后端进程内直接执行（本机未启用 Celery 调度器，属于正常回退）。',
+      });
+    } catch (error: any) {
       console.error('Failed to start task:', error);
-      alert('启动任务失败,请检查后端服务');
+      setNotice({ kind: 'error', text: `启动任务失败：${error?.message || '请检查后端服务'}` });
     }
   }
+
+  async function deleteTask(taskId: string) {
+    if (!confirm('确定删除这个任务吗？相关的会话、消息和情报记录会一起删除，且不可恢复。')) return;
+    try {
+      await fetchAPI(`/tasks/${taskId}`, { method: 'DELETE' });
+      loadTasks();
+      setNotice({ kind: 'ok', text: '任务已删除。' });
+    } catch (error: any) {
+      console.error('Failed to delete task:', error);
+      setNotice({ kind: 'error', text: `删除任务失败：${error?.message || '请检查后端服务'}` });
+    }
+  }
+
+  async function startWorker() {
+    try {
+      await serviceAPI.start('worker');
+      await loadTasks();
+      setNotice({ kind: 'ok', text: '任务调度器（Celery Worker）已启动。' });
+    } catch (error: any) {
+      console.error('Failed to start worker:', error);
+      setNotice({ kind: 'error', text: `启动调度器失败：${error?.message || '请检查后端服务'}` });
+    }
+  }
+
+  const workerService = services.find((s) => s.platform === 'worker');
+  const telegramService = services.find((s) => s.platform === 'telegram');
+  const telegramBusy = !!telegramService?.running;
 
   return (
     <div>
@@ -79,6 +148,61 @@ export default function TasksPage() {
         <div className="bg-rose-50 border-l-4 border-rose-500 p-3 mb-4 rounded">
           <p className="text-sm text-rose-700">
             ⚠️ <strong>后端不可达:</strong> {backendError}
+          </p>
+        </div>
+      )}
+
+      {notice && (
+        <div
+          className={`border-l-4 p-3 mb-4 rounded flex items-start justify-between gap-3 ${
+            notice.kind === 'error'
+              ? 'bg-rose-50 border-rose-500 text-rose-700'
+              : 'bg-emerald-50 border-emerald-500 text-emerald-700'
+          }`}
+        >
+          <p className="text-sm whitespace-pre-wrap">
+            {notice.kind === 'error' ? '⚠️ ' : '✅ '}
+            {notice.text}
+          </p>
+          <button onClick={() => setNotice(null)} className="text-xs underline shrink-0">
+            关闭
+          </button>
+        </div>
+      )}
+
+      {/* 调度器状态：没有它任务也能跑（后端进程内直跑），但跑起来的模式不一样 */}
+      <div className="bg-white border border-slate-200 rounded p-3 mb-4 flex items-center justify-between gap-4">
+        <div className="text-sm text-slate-600">
+          <span className="font-medium text-slate-800">任务调度器（Celery Worker）：</span>
+          {workerService?.running ? (
+            <span className="text-emerald-700">运行中（PID {workerService.pid}）</span>
+          ) : (
+            <span className="text-amber-700">未运行</span>
+          )}
+          {!workerService?.running && (
+            <span className="text-slate-500">
+              {' '}
+              —— 不启动也能跑任务：后端会在 API 进程内直接执行；启动后任务统一排队、互不阻塞。
+            </span>
+          )}
+        </div>
+        {!workerService?.running && (
+          <button
+            onClick={startWorker}
+            className="bg-slate-900 text-white px-3 py-1.5 rounded text-xs hover:bg-slate-800 shrink-0"
+          >
+            ▶ 启动调度器
+          </button>
+        )}
+      </div>
+
+      {telegramBusy && (
+        <div className="bg-amber-50 border-l-4 border-amber-500 p-3 mb-4 rounded">
+          <p className="text-sm text-amber-800">
+            ⚠️ Telegram 常驻在线服务正在运行，占用账号
+            {telegramService?.session ? ` @${telegramService.session}` : ''}
+            （监听私聊并自动回复）。<strong>外呼任务和它是互斥的</strong>：同一个账号同一时刻只能有一个
+            Telegram 客户端。想跑任务请先到「账号管理」页点「停止」。
           </p>
         </div>
       )}
@@ -124,6 +248,32 @@ export default function TasksPage() {
           value={form.target_region}
           onChange={(e) => setForm({ ...form, target_region: e.target.value })}
         />
+        <select
+          className="w-full border px-3 py-2 rounded"
+          value={taskAccount}
+          onChange={(e) => setTaskAccount(e.target.value)}
+          disabled={platformAccounts.length === 0}
+        >
+          {platformAccounts.length === 0 && <option value="">（该平台暂无账号）</option>}
+          {platformAccounts.map((a) => (
+            <option key={a.id} value={a.id}>
+              使用账号：{a.display_name || a.username || a.id}
+              {a.paused ? '（已暂停）' : ''}
+            </option>
+          ))}
+        </select>
+        {form.platform !== 'telegram' ? (
+          <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 leading-relaxed">
+            提示：Facebook / Zalo 的外呼流水线尚未接入，这类任务可以创建但<strong>无法启动</strong>
+            （目前只有 Telegram 支持搜群、加群、私聊）。
+          </p>
+        ) : (
+          <p className="text-xs text-slate-500 leading-relaxed">
+            外呼会真的搜群、加群，并私聊群里的活跃用户；Telegram 不允许普通账号拉成员列表，
+            所以程序会扫描群内最近发言来找带用户名的目标。任务运行时该账号会被独占，
+            请先停止它的「常驻在线服务」。
+          </p>
+        )}
         <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
           创建任务
         </button>
@@ -152,7 +302,19 @@ export default function TasksPage() {
         <tbody>
           {tasks.map((t) => (
             <tr key={t.id} className="border-t text-sm">
-              <td className="px-4 py-2 font-medium">{t.name}</td>
+              <td className="px-4 py-2 font-medium">
+                {t.name}
+                {t.config?.last_run && (
+                  <div className="text-xs text-slate-500 font-normal mt-0.5">
+                    上次运行：账号 {t.config.last_run.account ?? '-'} · 搜索{' '}
+                    {t.config.last_run.searched_keywords ?? 0} 个关键词 · 找到{' '}
+                    {t.config.last_run.found_groups ?? 0} 个群 · 加入{' '}
+                    {t.config.last_run.joined_groups ?? 0} 个 · 取到{' '}
+                    {t.config.last_run.members_found ?? 0} 个目标 · 发起{' '}
+                    {t.config.last_run.conversations ?? 0} 个会话
+                  </div>
+                )}
+              </td>
               <td className="px-4 py-2 capitalize">{t.platform === 'telegram' ? '✈️ Telegram' : t.platform}</td>
               <td className="px-4 py-2">
                 {t.category === 'private_investigator' ? '🔍 私人侦探' :
@@ -173,11 +335,19 @@ export default function TasksPage() {
                    '⚪ 等待中'}
                 </span>
               </td>
-              <td className="px-4 py-2">
+              <td className="px-4 py-2 space-x-2">
                 {t.status === 'pending' && (
                   <button
                     onClick={() => startTask(t.id)}
-                    className="bg-green-600 text-white px-3 py-1 rounded text-xs hover:bg-green-700"
+                    disabled={(telegramBusy && t.platform === 'telegram') || t.platform !== 'telegram'}
+                    title={
+                      t.platform !== 'telegram'
+                        ? '该平台的外呼流水线尚未接入，无法启动'
+                        : telegramBusy
+                          ? '常驻在线服务正在占用这个账号，请先停止服务'
+                          : '启动任务：搜群 → 加群 → 取目标 → 主动私聊'
+                    }
+                    className="bg-green-600 text-white px-3 py-1 rounded text-xs hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     ▶️ 启动
                   </button>
@@ -185,6 +355,12 @@ export default function TasksPage() {
                 {t.status === 'running' && (
                   <span className="text-xs text-gray-500">执行中...</span>
                 )}
+                <button
+                  onClick={() => deleteTask(t.id)}
+                  className="bg-white border border-rose-200 text-rose-600 px-3 py-1 rounded text-xs hover:bg-rose-50"
+                >
+                  🗑 删除
+                </button>
               </td>
               <td className="px-4 py-2">{new Date(t.created_at).toLocaleString('zh-CN')}</td>
             </tr>

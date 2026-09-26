@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -103,6 +104,41 @@ class RemoveSessionFilesTests(unittest.TestCase):
     def test_missing_files_are_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(session_paths.remove_session_files(Path(tmp) / "nope"), [])
+
+
+class SessionInUseTests(unittest.TestCase):
+    def test_detects_lock_held_by_another_connection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.session"
+            holder = sqlite3.connect(str(path))
+            try:
+                holder.execute("CREATE TABLE t (x INTEGER)")
+                holder.commit()
+                self.assertFalse(session_paths.session_in_use(path))
+
+                holder.execute("BEGIN IMMEDIATE")  # 模拟"被别的客户端占着"
+                self.assertTrue(session_paths.session_in_use(path))
+
+                holder.execute("ROLLBACK")
+                self.assertFalse(session_paths.session_in_use(path))
+            finally:
+                holder.close()
+
+    def test_missing_file_is_not_in_use(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(session_paths.session_in_use(Path(tmp) / "nope"))
+
+
+class SessionNameValidationTests(unittest.TestCase):
+    def test_accepts_normal_names(self):
+        for name in ("printer", "tg8801934061959", "user-3", "a", "a" * 48):
+            with self.subTest(name=name):
+                self.assertTrue(session_paths.is_valid_session_name(name))
+
+    def test_rejects_path_traversal_and_bad_chars(self):
+        for name in ("../printer", "..\\printer", "/tmp/x", "TEST", "user 1", "", "-a", "a" * 49):
+            with self.subTest(name=name):
+                self.assertFalse(session_paths.is_valid_session_name(name))
 
 
 if __name__ == "__main__":

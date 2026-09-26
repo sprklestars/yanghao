@@ -21,12 +21,22 @@ interface LiveMessage {
 }
 
 export default function AccountsPage() {
+  // 会话名会拼成 sessions/<name>.session，字符集必须和后端 _require_valid_session_name 一致
+  const SESSION_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
+  const deriveSessionName = (phone: string) => {
+    const digits = phone.replace(/\D/g, '');
+    return digits ? `tg${digits}` : '';
+  };
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [services, setServices] = useState<ServiceStatus[]>([]);
   const [loaded, setLoaded] = useState(false);
   // 后端不可达时才设置；账号列表为空是正常状态，不再当成"演示模式"
   const [backendError, setBackendError] = useState('');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  // 启动/停止平台服务失败时的提示（以前只 console.error，界面上看着像"没反应"）
+  const [serviceError, setServiceError] = useState('');
+  // 账号级操作的失败提示（例如会话文件被占用导致删不掉）
+  const [pageError, setPageError] = useState('');
   const [logView, setLogView] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [chatView, setChatView] = useState<string | null>(null);
@@ -109,15 +119,29 @@ export default function AccountsPage() {
 
   const getServiceForPlatform = (platform: string) => services.find((s) => s.platform === platform);
 
-  const handleStart = async (platform: string) => {
+  const handleStart = async (platform: string, session?: string) => {
     setActionLoading(platform);
-    try { await serviceAPI.start(platform); await loadData(); } catch (e) { console.error('Start failed:', e); }
+    setServiceError('');
+    try {
+      await serviceAPI.start(platform, session);
+      await loadData();
+    } catch (e: any) {
+      console.error('Start failed:', e);
+      setServiceError(`启动 ${platform} 服务失败：${e?.message || e}`);
+    }
     setActionLoading(null);
   };
 
   const handleStop = async (platform: string) => {
     setActionLoading(platform);
-    try { await serviceAPI.stop(platform); await loadData(); } catch (e) { console.error('Stop failed:', e); }
+    setServiceError('');
+    try {
+      await serviceAPI.stop(platform);
+      await loadData();
+    } catch (e: any) {
+      console.error('Stop failed:', e);
+      setServiceError(`停止 ${platform} 服务失败：${e?.message || e}`);
+    }
     setActionLoading(null);
   };
 
@@ -185,9 +209,11 @@ export default function AccountsPage() {
     try {
       await accountAPI.delete(accountId);
       setDeleteConfirm(null);
+      setPageError('');
       loadData();
-    } catch (e) {
+    } catch (e: any) {
       console.error('Failed to delete account:', e);
+      setPageError(`删除账号 ${accountId} 失败：${e?.message || e}`);
     }
   };
 
@@ -253,11 +279,16 @@ export default function AccountsPage() {
   };
 
   const handleSendCode = async () => {
-    if (!loginPhone || !loginSessionName) { setLoginError('请输入Session名称和手机号码'); return; }
+    const sessionName = loginSessionName.trim();
+    if (!SESSION_NAME_RE.test(sessionName)) {
+      setLoginError('Session 名称只能用 1-48 位小写字母、数字、下划线或短横线，并以字母/数字开头');
+      return;
+    }
+    if (!loginPhone) { setLoginError('请输入手机号码'); return; }
     setLoginLoading(true);
     setLoginError('');
     try {
-      await accountAPI.telegramSendCode(loginPhone, loginSessionName);
+      await accountAPI.telegramSendCode(loginPhone, sessionName);
       setLoginStep('code');
     } catch (e: any) {
       const msg = e?.message || '';
@@ -324,6 +355,16 @@ export default function AccountsPage() {
           ? `后端不可达 — 请确认 API 已在 8000 端口启动（${backendError}）`
           : '已连接后端服务'}
       </div>
+      {serviceError && (
+        <div className="mb-6 px-4 py-2.5 rounded-lg text-sm font-medium bg-rose-50 text-rose-800 border border-rose-200 whitespace-pre-wrap">
+          ⚠️ {serviceError}
+        </div>
+      )}
+      {pageError && (
+        <div className="mb-6 px-4 py-2.5 rounded-lg text-sm font-medium bg-rose-50 text-rose-800 border border-rose-200 whitespace-pre-wrap">
+          ⚠️ {pageError}
+        </div>
+      )}
 
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
@@ -363,19 +404,31 @@ export default function AccountsPage() {
                     <span className="text-xl">{config.icon}</span>
                     <h3 className="font-semibold text-base">{config.label}</h3>
                     <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${isRunning ? 'bg-white/20 text-white' : 'bg-black/20 text-white/70'}`}>
-                      {isRunning ? '运行中' : '未运行'}
+                      {isRunning
+                        ? `运行中${svc?.session ? ` · @${svc.session}` : ''}`
+                        : '未运行'}
                     </span>
                     <span className="text-xs text-white/60">{platformAccounts.length} 个账号</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    {!isRunning ? (
-                      <button onClick={() => handleStart(platform)} disabled={isLoading}
-                        className="px-3 py-1.5 bg-white/20 backdrop-blur text-white rounded-lg text-xs font-medium hover:bg-white/30 disabled:opacity-50 transition-colors">
-                        {isLoading ? '启动中...' : '▶ 启动'}
+                    {platform === 'zalo' ? (
+                      <span className="px-3 py-1.5 text-xs text-white/70">暂不支持常驻服务</span>
+                    ) : !isRunning ? (
+                      <button
+                        onClick={() => handleStart(platform, platformAccounts[0]?.id)}
+                        disabled={isLoading}
+                        title="启动常驻在线服务：保持在线、监听私聊并自动回复（用于养号/实时对话）；它与任务管理里的外呼任务互斥"
+                        className="px-3 py-1.5 bg-white/20 backdrop-blur text-white rounded-lg text-xs font-medium hover:bg-white/30 disabled:opacity-50 transition-colors"
+                      >
+                        {isLoading ? '启动中...' : '▶ 启动在线服务'}
                       </button>
                     ) : (
-                      <button onClick={() => handleStop(platform)} disabled={isLoading}
-                        className="px-3 py-1.5 bg-black/20 backdrop-blur text-white rounded-lg text-xs font-medium hover:bg-black/30 disabled:opacity-50 transition-colors">
+                      <button
+                        onClick={() => handleStop(platform)}
+                        disabled={isLoading}
+                        title="停止常驻在线服务，之后该账号就可以用来跑外呼任务"
+                        className="px-3 py-1.5 bg-black/20 backdrop-blur text-white rounded-lg text-xs font-medium hover:bg-black/30 disabled:opacity-50 transition-colors"
+                      >
                         {isLoading ? '停止中...' : '⏹ 停止'}
                       </button>
                     )}
@@ -385,6 +438,13 @@ export default function AccountsPage() {
                     </button>
                   </div>
                 </div>
+                {platform !== 'zalo' && (
+                  <div className="px-5 py-2 text-xs text-slate-500 bg-slate-50 border-b border-slate-100">
+                    常驻在线服务 = 该账号登录后一直在线，监听私聊并按人设自动回复（养号 / 实时对话）。
+                    它与「任务管理」里的外呼任务<strong className="text-slate-700">互斥</strong>
+                    ：同一个账号同一时刻只能有一个 Telegram 客户端，启动任务前请先停掉服务。
+                  </div>
+                )}
 
                 {/* Log viewer */}
                 {logView === platform && (
@@ -622,11 +682,22 @@ export default function AccountsPage() {
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Session 名称</label>
                   <input type="text" value={loginSessionName} onChange={(e) => setLoginSessionName(e.target.value)}
-                    placeholder="例如: user5" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-slate-900 focus:border-transparent outline-none text-sm transition-shadow" />
+                    placeholder="留空会按手机号自动生成，例如 tg8801934061959" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-slate-900 focus:border-transparent outline-none text-sm transition-shadow" />
+                  <p className="text-xs text-slate-400 mt-1">1-48 位小写字母、数字、下划线或短横线，并以字母/数字开头（会作为 sessions/&lt;名称&gt;.session 的文件名）</p>
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">手机号码 (含国际区号)</label>
-                  <input type="tel" value={loginPhone} onChange={(e) => setLoginPhone(e.target.value)}
+                  <input type="tel" value={loginPhone}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      // 没手动改过会话名时，按手机号自动生成，省得手输
+                      setLoginSessionName((current) =>
+                        current === '' || current === deriveSessionName(loginPhone)
+                          ? deriveSessionName(value)
+                          : current,
+                      );
+                      setLoginPhone(value);
+                    }}
                     placeholder="+8613800138000" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-slate-900 focus:border-transparent outline-none text-sm transition-shadow" />
                 </div>
                 <div className="flex gap-2 pt-1">

@@ -28,13 +28,22 @@ sys.path.insert(0, str(Path(__file__).parent))
 from telethon import TelegramClient, events
 
 from app.core.config import settings
+from app.core.processes import pid_alive
 from app.core.proxy import telegram_proxy
 from app.core.session_paths import ensure_session_dir
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
 
+
+def _resolve_session_name() -> str:
+    """常驻进程用哪个账号：由 API 通过 TG_SESSION_NAME 传入账号 id，默认 printer。"""
+    value = os.environ.get("TG_SESSION_NAME", "printer").strip() or "printer"
+    # 只给了会话名（如 test）时补上 sessions/ 前缀，否则 Telethon 会写到当前目录。
+    return value if os.path.dirname(value) else f"sessions/{value}"
+
+
 # 配置
-SESSION_NAME = "sessions/printer"
+SESSION_NAME = _resolve_session_name()
 PROXY = telegram_proxy()
 
 PERSONA_PRESETS = {
@@ -551,10 +560,10 @@ if __name__ == "__main__":
         elif command == "status":
             pid = read_pid()
             if pid:
-                try:
-                    os.kill(pid, 0)
+                # 不要用 os.kill(pid, 0)：Windows 上它会直接杀掉进程
+                if pid_alive(pid):
                     logger.info(f"✅ 运行中 (PID: {pid})")
-                except ProcessLookupError:
+                else:
                     logger.info("❌ 进程不存在 (清理PID文件)")
                     remove_pid()
             else:

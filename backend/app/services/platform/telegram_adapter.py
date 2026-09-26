@@ -10,6 +10,7 @@ from telethon.errors import FloodWaitError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.contacts import AddContactRequest
 from telethon.tl.functions.contacts import SearchRequest as ContactsSearchRequest
+from telethon.tl.types import User
 
 from app.core.session_paths import ensure_session_dir
 from app.services.platform.base import (
@@ -82,8 +83,27 @@ class TelegramAdapter(PlatformAdapter):
             return False
 
     async def disconnect(self) -> None:
-        if self._client and self._client.is_connected():
-            await self._client.disconnect()
+        client = self._client
+        if client is None:
+            return
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception as e:
+            # disconnect() 内部会 save_states 再 close，中途抛错就走不到 close。
+            logger.warning("Telethon 断开时出错（继续清理会话文件）: %s", e)
+        finally:
+            # 关键：Telethon 只在 _disconnect_coro 的最后一步关 session，
+            # 任何中途异常（例如 SQLite "database is locked"）都会让连接一直开着，
+            # 于是这个进程永久占着 .session 文件，其它进程/任务全部失败。
+            # 这里无论如何都显式关闭。
+            try:
+                result = client.session.close()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.warning("关闭会话文件失败: %s", e)
+            self._client = None
 
     async def search_groups(self, query: str, limit: int = 10) -> list[GroupInfo]:
         assert self._client is not None
@@ -112,8 +132,11 @@ class TelegramAdapter(PlatformAdapter):
             logger.warning("FloodWait %ds on search_groups", e.seconds)
             await asyncio.sleep(e.seconds)
         except Exception as e:
-            logger.error("search_groups error: %s", e)
             self._error_count += 1
+            logger.error("search_groups error: %s", e, exc_info=True)
+            # 以前这里把异常吞掉只返回空列表：任务会"成功完成"但一个群都没搜到，
+            # 日志里也看不出原因。改成向上抛，调用方（接口/任务）自己决定怎么报错。
+            raise
         return results
 
     async def join_group(self, group_id: str) -> bool:
@@ -231,7 +254,10 @@ class TelegramAdapter(PlatformAdapter):
             typing_delay = chars * 0.05 * random.uniform(0.7, 1.3)
             await asyncio.sleep(min(typing_delay, 10))
 
-            await self._client.send_message(int(target_id), content.text)
+            # target_id 可能是数字 id，也可能是 "@username"（群成员列表拿不到时
+            # 只能从群消息里捡带用户名的发言者来私聊）
+            target = int(target_id) if str(target_id).lstrip("-").isdigit() else target_id
+            await self._client.send_message(target, content.text)
 
             # Record the operation
             warming_manager.record_operation(
@@ -425,9 +451,65 @@ class TelegramAdapter(PlatformAdapter):
             logger.warning("FloodWait %ds on get_group_members", e.seconds)
             await asyncio.sleep(e.seconds)
         except Exception as e:
-            logger.error("get_group_members error: %s", e)
             self._error_count += 1
+            # Telegram 从 2021 起只允许**管理员**拉成员列表，
+            # 普通账号调用 GetParticipantsRequest 会报
+            # "Chat admin privileges are required"。这是平台限制，绕不过去，
+            # 所以退回「扫描最近消息、收集发言者」——发言者里有 @username 的可以直接私聊。
+            logger.warning("get_group_members 受限(%s)，改为扫描群消息收集发言者: %s", group_id, e)
+            members = await self._members_from_recent_messages(group_id, limit=limit)
         return members
+
+    async def _members_from_recent_messages(
+        self, group_id: str, limit: int = 50
+    ) -> list[UserProfile]:
+        """兜底方案：从群最近的消息里收集发言者（不需要管理员权限）。"""
+        assert self._client is not None
+        found: dict[str, UserProfile] = {}
+        try:
+            entity = await self._client.get_entity(int(group_id))
+            # 广播频道本身没人聊天，"人"都在它的关联讨论群里
+            linked_chat_id = getattr(entity, "linked_chat_id", None)
+            if linked_chat_id:
+                try:
+                    entity = await self._client.get_entity(linked_chat_id)
+                    logger.info("%s 是频道，改从其关联讨论群取目标", group_id)
+                except Exception as e:
+                    logger.warning("取 %s 的关联讨论群失败: %s", group_id, e)
+            async for msg in self._client.iter_messages(entity, limit=limit):
+                sender = getattr(msg, "sender", None)
+                if sender is None or getattr(sender, "bot", False):
+                    continue
+                # 只收真实用户：频道/群会以 Channel 形式出现在 sender 里，
+                # @频道名 是没法私聊的
+                if not isinstance(sender, User):
+                    continue
+                user_id = str(getattr(sender, "id", "") or "")
+                if not user_id or user_id in found:
+                    continue
+                display_name = " ".join(
+                    part
+                    for part in (
+                        getattr(sender, "first_name", "") or "",
+                        getattr(sender, "last_name", "") or "",
+                    )
+                    if part
+                ).strip() or getattr(sender, "title", "") or user_id
+                found[user_id] = UserProfile(
+                    user_id=user_id,
+                    display_name=display_name,
+                    username=getattr(sender, "username", None),
+                )
+            logger.info(
+                "扫描 %s 最近 %d 条消息，找到 %d 个发言者（其中 %d 个有用户名可私聊）",
+                group_id,
+                limit,
+                len(found),
+                sum(1 for m in found.values() if m.username),
+            )
+        except Exception as e:
+            logger.error("扫描群消息兜底失败: %s", e, exc_info=True)
+        return list(found.values())
 
     def get_health_status(self) -> AccountHealthStatus:
         error_rate = self._error_count / max(self._total_actions, 1)

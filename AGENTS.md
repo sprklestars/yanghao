@@ -35,7 +35,7 @@
 
 **2026-09-25 这批改动（在 `setup-and-fixes` 分支）**：修复依赖安装与打包配置、修复 4 个真实 bug（CORS 白名单、会话结束端点的三种错误、TG 会话检测属性名）、**删除前端全部演示数据与降级逻辑**（现在空列表就是空列表，只有真连不上才报"后端不可达"）、ruff 从 360 项清零、单测从 14 个补到 53 个。
 
-**2026-09-26 这批改动**：修掉几个「连不上 Telegram / 账号列表乱显示」的真因——① 补上 Telethon 走代理所需的 `python-socks[asyncio]`（缺失时报 `No module named 'socks'`）；② 把各调用点写死的 `('http', '127.0.0.1', 7890)` 改成 `.env` 的 `TG_PROXY_URL`（本机 7890 实际只认 SOCKS5，按 HTTP 连会一直报 `Connection to Telegram failed N time(s)`）；③ 新增 `Settings.telegram_credentials_error()` 前置校验，把 `api_id/api_hash` 误填（手机号、示例占位值、hash 长度不对）从英文报错变成中文提示，并把 `env_file` 固定为 `backend/.env` 的绝对路径；④ 新增 `app/core/session_paths.py`（构造 `TelegramClient` 前保证 `sessions/` 存在），并清理「登录失败留下的空会话」——`test-connection` 改用内存会话、`send-code`/`verify-code` 失败时删除本次新建的 `.session`，不再让账号列表凭空多出账号。单测 53 → 78。
+**2026-09-26 这批改动**：修掉几个「连不上 Telegram / 账号列表乱显示 / 启动服务没反应」的真因——① 补上 Telethon 走代理所需的 `python-socks[asyncio]`（缺失时报 `No module named 'socks'`）；② 把各调用点写死的 `('http', '127.0.0.1', 7890)` 改成 `.env` 的 `TG_PROXY_URL`（本机 7890 实际只认 SOCKS5，按 HTTP 连会一直报 `Connection to Telegram failed N time(s)`）；③ 新增 `Settings.telegram_credentials_error()` 前置校验，把 `api_id/api_hash` 误填（手机号、示例占位值、hash 长度不对）从英文报错变成中文提示，并把 `env_file` 固定为 `backend/.env` 的绝对路径；④ 新增 `app/core/session_paths.py`（构造 `TelegramClient` 前保证 `sessions/` 存在），并清理「登录失败留下的空会话」——`test-connection` 改用内存会话、`send-code`/`verify-code` 失败时删除本次新建的 `.session`，不再让账号列表凭空多出账号；⑤ 修服务启动链路：`PROXY` 从元组改 dict 曾让 `persistent_chat_demo.py` 以 `KeyError: 1` 启动即退出（已改回 Telethon 要求的元组），启动失败不再假装成功而是返回日志尾部，Windows 上 `os.kill(pid, 0)` 会杀进程改用 `app/core/processes.pid_alive()`，`/services/{platform}/start?session=` 可指定账号（经 `TG_SESSION_NAME` 传给守护进程），日志统一 UTF-8；⑥ 任务页可用性：`tasks/{id}/start` 不再把 `PENDING`（"等待中"）误判成"已在运行"，没有 Celery worker 时自动在 API 进程内执行并回 `mode: inline`，新增 `DELETE /tasks/{id}` 与前端删除按钮，前端报错改为显示后端真实原因。单测 53 → 82。
 
 ---
 
@@ -108,6 +108,8 @@ docker-compose.yml
 ```
 
 注意：`run_task` 里只有 Telegram 分支是实现的，其他平台直接置为 `PAUSED`。（早期文档里的 FB/Zalo「代码就绪待实测」指适配器已写好，但任务流水线未接入。）
+
+> 选账号的顺序：先查 DB 的 `accounts` 表（`is_active`），**表里没有就取 `sessions/` 目录里第一个 `.session` 并在 `accounts` 表补登记一条**（会话表 `conversations.account_id` 是外键，没有这行没法落库）——账号列表本来就是扫这个目录的，两边以前对不上，会出现「界面上有账号、任务却报找不到可用账号直接 FAILED」。选定的账号再按 `sessions/<username>.session` 找会话文件，找到就直接用它登录（不需要手机号/验证码），找不到才退回 `osint_<account.id>`。所有 `TelegramAdapter` 都带上 `TG_PROXY_URL`，否则 Telegram 握手会失败。
 
 ### 5.2 对话状态机
 
@@ -183,6 +185,19 @@ IDLE → VERIFICATION → GREETING → PROBING → EXTRACTION → EXIT
 
 ---
 
+### 5.8 运行模型：三种进程，各管一段
+
+| 入口 | 实际进程 | 干什么 | 占用账号的 `.session`？ |
+|------|----------|--------|------------------------|
+| 账号管理 →「启动在线服务」 | `persistent_chat_demo.py`（API 拉起，写 `chat_demo.pid`，并把账号名记到 `chat_demo.session`） | 该账号**常驻在线**：监听私聊、按人设自动回复、顺便养号 | 是，独占 |
+| 任务管理 →「启动」 | Celery worker 执行 `run_task`；**没有 worker 时**由 API 进程内直跑 | **一次性外呼**：搜群 → 加群 → 拉成员 → 主动私聊 → 采集情报 | 是，独占 |
+| 任务管理 →「启动调度器」 | `celery -A app.workers.tasks worker`（API 拉起，写 `celery_worker.pid`） | 消费任务队列。缺它时任务退化为 API 进程内直跑，功能一样但不能排队/并发 | 否 |
+
+- **互斥规则**：同一个 Telegram 账号同一时刻只能有一个客户端（Telegram 侧限制 + 本地 SQLite 单写锁），所以「常驻在线服务」和「外呼任务」不能同时跑。API 现在**双向拦截**并给中文原因：任务启动时若服务在跑 → 400 提示先停止服务；服务启动时若有任务处于 RUNNING → 400 提示先结束任务。
+- 想同时做"在线接客"和"主动外呼"，就用**两个账号**，各挂一个。
+- 「未检测到 Celery worker」不再是错误：`POST /tasks/{id}/start` 会先 ping worker，没有就自动拉起一个，仍不可用才回退进程内直跑，并在响应里返回 `mode: celery|inline`；任务页顶部常显调度器状态和一键启动按钮。
+- 每次外呼跑完会把摘要写进 `task.config["last_run"]`（搜了几个关键词 / 找到、加入多少群 / 起了多少会话），任务页直接显示，避免"完成了却不知道做了什么"。
+
 ## 6. 数据模型与存储
 
 关系：`Persona 1:N Account 1:N Task 1:N Conversation 1:N Message`，`Conversation 1:N IntelligenceRecord`。
@@ -212,9 +227,13 @@ IDLE → VERIFICATION → GREETING → PROBING → EXTRACTION → EXIT
 
 群组：`POST /groups/search`（支持 AI 关键词扩展）、`POST /groups/join`、`POST /groups/add-by-link`
 
-任务/对话/情报：`POST|GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/start`、`GET /conversations`、`GET /conversations/{id}`、`POST /conversations/{id}/end`（前端「拉黑」按钮走这里：只置 `ended_at` + 状态为 exit + WebSocket 通知，**并不写入 blocklist**）、`GET /intelligence`
+任务/对话/情报：`POST|GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/start`、`DELETE /tasks/{id}`（按依赖顺序删消息 → 会话 → 情报 → 任务；外键没有 ondelete cascade）、`GET /conversations`、`GET /conversations/{id}`、`POST /conversations/{id}/end`（前端「拉黑」按钮走这里：只置 `ended_at` + 状态为 exit + WebSocket 通知，**并不写入 blocklist**）、`GET /intelligence`
+
+> `tasks/{id}/start` 只拦「正在运行」的任务（`PENDING` 是新建任务的默认状态、界面上叫"等待中"，不代表"已在运行"）；派发前先 ping Celery worker，**没有 worker 就在 API 进程内用 `run_task.apply()` 直接执行**并在响应里回 `mode: "inline"`，否则任务只会永远挂在"运行中"（本机通常只开 uvicorn + next，没有 worker）。
 
 服务：`GET /services/status`、`POST /services/{platform}/start|stop`、`GET /services/{platform}/logs`（`platform ∈ {telegram, facebook}`，分别对应 `persistent_chat_demo.py` / `persistent_facebook_demo.py`，PID 文件 `chat_demo.pid` / `facebook_demo.pid`，日志在 `logs/`）
+
+> `start` 支持 `?session=<会话名>` 指定挂载哪个账号（前端会把该平台账号列表里的第一个传进来）：常驻进程一次只跑一个账号，`persistent_chat_demo.py` 通过 `TG_SESSION_NAME` 环境变量接收，默认 `printer`。目录里一个 `.session` 都没有时直接返回 400，而不是傻等一个并不存在的会话。
 
 其他：`GET /health`、`WS /ws`
 
@@ -229,7 +248,7 @@ Telegram ↔ persistent_chat_demo.py ↔ WS ↔ FastAPI(manager) ↔ WS ↔ Next
 ```
 
 - Channel：`global`（全局广播）、`task:<id>`（任务进度）、`conv:<id>`（单会话）；客户端发 `{"type":"subscribe","channel":...}` 切换频道。
-- `persist_message()`（`main.py`）收到 `telegram_message` 事件后自动补齐 Account / Task / Conversation / Message 记录：用 `uuid5(NAMESPACE_DNS, "account-<名字>")` 和 `uuid5(..., "task-auto-<平台>")` 生成确定性 UUID 保证幂等；找不到未结束会话就新建（新建时初始状态直接是 `PROBING`）。
+- `persist_message()`（`main.py`）收到 `telegram_message` 事件后自动补齐 Account / Task / Conversation / Message 记录：用 `uuid5(NAMESPACE_DNS, "account-<名字>")` 和 `uuid5(..., "task-auto-<平台>")` 生成确定性 UUID 保证幂等；找不到未结束会话就新建（新建时初始状态直接是 `PROBING`）。**入站消息还会顺带抽情报**（`_extract_intelligence()` → `intelligence_records`，按 `dedup_fingerprint` 去重），这是情报报告页唯一的数据来源；`Auto-*` 容器任务不会出现在任务列表里。
 - 守护进程侧 `WSBridge` 连 `ws://localhost:8000/ws`，连不上只告警不影响聊天（但前端收不到实时更新）。
 
 ---
@@ -329,9 +348,10 @@ mypy .
 
 8. **`live-chat` 页面的演示开关不一致**：`frontend/src/app/live-chat/page.tsx` 里 `demoMode` 初始为 `true`，而仓库根的 `REAL_DEMO_GUIDE.md` 让人去改 `DEMO_MODE`；`frontend/LIVE_CHAT_DEMO.md` 描述的又是另一种状态。
 
-9. **Celery 里同步/异步混用**：`tasks.py` 用 `asyncio.new_event_loop()` 逐个桥接异步适配器，每次调用都新建事件循环，属于权宜实现；改动这块要留意事件循环关闭与连接复用。
+9. ~~**Celery 里同步/异步混用**~~ ✅ **已修复**：以前 `tasks.py` 每个适配器调用都 `asyncio.new_event_loop()`，而 Telethon 明确要求「连接期间不能换事件循环」，于是鉴权之后的 search/join/send 全部报 `The asyncio event loop must not change after connection`，任务却照样显示"完成"（加上适配器把 search 异常吞掉返回空列表，问题被完全隐藏）。现在整个外呼流程（鉴权 → 搜索 → 加群 → 取成员 → 发开场白）跑在同一个 `asyncio.run(_campaign())` 里，`_start_conversation` 也改成 async；`search_groups` 不再吞异常而是向上抛，任务会如实 FAILED；每次跑完把 `searched_keywords / found_groups / joined_groups / conversations` 写进 `task.config["last_run"]`，任务页直接显示"上次运行：搜了 N 个关键词 · 找到 M 个群 · 发起 K 个会话"，避免"完成了但什么都没干"看不出原因。
 
 10. **bash 脚本在 Windows 上不能直接跑**：`scripts/*.sh`、`backend/start_chat_service.sh` 依赖 `source venv/bin/activate`、`nohup`、`ps`、`lsof` 等 POSIX 设施，需要 WSL / Git Bash。Windows 下请直接用 `uvicorn` / `celery` / `python xxx.py`；同时注意 `routes.py` 的 `os.kill(pid, 0)` 与 `start_new_session=True` 也是类 Unix 语义。
+    ~~`routes.py` / `persistent_chat_demo.py` 用 `os.kill(pid, 0)` 判断服务是否在跑~~ ✅ **已修复**：Windows 上 `os.kill(pid, 0)` 等价于 `TerminateProcess`，**会把服务直接杀掉**（「查看状态」反而弄停了服务）。现在统一走 `app/core/processes.pid_alive()`（Windows 用 `OpenProcess` + `GetExitCodeProcess`）；`start_new_session=True` 保留（Windows 忽略），另加 `DETACHED_PROCESS` 让守护进程不随 API 退出。
 
 11. **架构设计稿里的 MinIO / Nginx / K8s / Prometheus / Celery Beat / 情报图谱均无代码落地**（`architecture-design.md` 属设计意图，不是现状描述）。
 
@@ -341,6 +361,16 @@ mypy .
     ~~该端点用 `conv.state = "exit"` 赋小写字符串~~ ✅ **已修复**（改用 `ConversationState.EXIT`），同时修掉了同一处 `datetime.now(datetime.timezone.utc)` 这种取不到时区、必然 `AttributeError` 的写法——也就是说这个端点在修复前每次调用都会 500。
 
 14. **前端演示数据已全部移除**（2026-09-25）：`DEMO_ACCOUNTS` / `DEMO_CONVERSATIONS` / `DEMO_INTELLIGENCE` / `MOCK_TASKS` / `DEMO_MESSAGES` 及 live-chat 的随机假消息定时器都已删除。因此现在"列表为空"会如实显示空状态，而 `backend/scripts/seed_demo_data.py` 仍会写入演示数据——要干净环境就别跑它。
+
+15. **一个账号同一时刻只能有一个客户端**：`sessions/<name>.session` 是 SQLite 文件，常驻服务（`persistent_chat_demo.py`）和任务流水线（`run_task`）同时用它就会 `sqlite3.OperationalError: database is locked`——表现是任务刚启动就 FAILED，之后连鉴权都过不去（`sessions/*.session-journal` 残留就是线索）。现在：① 任务流水线用 `try/finally` 保证 `adapter.disconnect()`；② `POST /tasks/{id}/start` 在 Telegram 常驻服务运行时直接返回 400，提示先停止服务；③ 进程内直跑改调 `_run_task_pipeline()`，不走 Celery 的 `self.retry()`（eager 模式下它会把整个任务体重跑最多 4 次，对会加群/私聊的任务太危险）；④ **光调 `client.disconnect()` 不够**：Telethon 只在 `_disconnect_coro` 的最后一步才 `session.close()`，中途抛错（例如状态写不进这个锁住的文件）就会永久占着 `.session`，所以 `TelegramAdapter.disconnect()` 现在无论如何都显式 `client.session.close()`；⑤ 启动任务前用 `session_paths.session_in_use()` 探测写锁，被占用直接 400 并提示「关掉多余后端进程 / 重启后端」，不再让人对着 `database is locked` 猜。遇到这种锁，最直接的解法就是重启占用它的后端进程。
+
+16. **群组页的账号下拉、幽灵会话、以及"拉不到群成员"**：① `frontend/src/app/groups/page.tsx` 以前把账号名**硬编码**成 `printer / user3 / user4`（那是演示脚本的会话名）。选中后调 `/groups/*`，Telethon 一构造客户端就凭空建出 `sessions/printer.session`，账号管理里于是多出一个"删不掉的账号"——文件句柄被 API 进程占着，Windows 报 `WinError 32`。现在下拉改成读 `/accounts`；后端三个 `/groups/*` 端点统一用 `_open_telegram_adapter()`：**会话文件不存在就直接 400，不碰 Telethon**，并且 `finally` 一定 `disconnect()`；`DELETE /accounts/{id}` 遇到占用会回 409 + 中文说明（重启后端即可释放句柄）。
+    ② **Telegram 从 2021 起只允许管理员拉群成员**（`GetParticipantsRequest` → 「Chat admin privileges are required」），所以「加入 10 个群、发起 0 个会话、情报为空」是平台限制，不是程序 bug。现在 `get_group_members()` 受限时会退回**扫描群最近消息收集发言者**：只收 `telethon.tl.types.User`（跳过频道自身与 bot），频道若带 `linked_chat_id` 就转去它的关联讨论群扫；私聊优先用 `@username`（裸数字 id 没有实体缓存时不可靠）。任务摘要新增 `members_found / dm_failed`，前端一并显示。
+    ③ 选账号不再"取 `sessions/` 里第一个文件"（那里可能残留没登录成功的空会话），而是 `_telegram_session_candidates()` + 逐个 `authenticate()`，**试到第一个真正登录过的会话**；常驻服务启动同理（`_first_authorized_session()`），不会被幽灵会话带偏。
+
+17. **情报报告为什么一直是空的** ✅ **已接上**：`intelligence_records` 以前只由 `workers.process_incoming_message()` 写，而那个 Celery 任务**全仓库没有任何调用点**（守护进程有自己的回复逻辑，也不写情报），所以情报页永远是 0 条。现在 `persist_message()` 在保存**入站**消息后会调用 `_extract_intelligence()`：`extract_entities` + `classify_category` + `calculate_activity_score`，按 `dedup_fingerprint` 去重更新（同一目标不重复建行）。注意：**没命中四类业务信号词（私家侦探/换汇/自由职业/数据贩卖）的消息不会建记录**，这是刻意的——情报只针对特定业务线索，不是聊天记录转储。另外 `persist_message()` 为守护进程消息自动创建的容器任务（`Auto-<平台>`）已在 `GET /tasks` 里过滤掉，不会出现在任务列表；它同时会建一个 `Account` 行（`uuid5("account-<会话名>")`），`run_task` 的账号解析会复用这一行。
+
+18. **任务用哪个账号：显式选，不要猜**：任务创建表单新增账号下拉（按所选平台从 `/accounts` 过滤），选中的值写进 `task.config["account"]`，`run_task` 用 `_telegram_session_candidates(account, preferred_name)` **优先用它**，没选才自动挑（逐个试鉴权，跳过空会话）。同时三平台的行为对齐：**只有 Telegram 有外呼流水线**，所以 Facebook/Zalo 任务在界面上标注"尚未接入、无法启动"，后端 `POST /tasks/{id}/start` 也直接返回 400 说明原因（不再静默置 PAUSED）。会话名也不再"手输随便填"：前端在填手机号时自动生成 `tg<手机号数字>`（可改），前后端共用同一套规则 `app/core/session_paths.is_valid_session_name()`（1-48 位小写字母/数字/下划线/短横线，且不能以符号开头）——既统一体验，也挡住了 `../evil` 这类会写到 `sessions/` 目录之外的路径穿越。
 
 ---
 

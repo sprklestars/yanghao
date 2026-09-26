@@ -32,6 +32,9 @@ class TaskResponse(BaseModel):
     keywords: list[str]
     target_region: str | None
     status: TaskStatus
+    # 最近一次运行的摘要（搜了几个关键词、找到/加入多少群、起了几个会话），
+    # 前端用它回答"任务跑完了到底做了什么"
+    config: dict = {}
     created_at: datetime
     updated_at: datetime
 

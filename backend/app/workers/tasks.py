@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -7,6 +8,8 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.proxy import telegram_proxy
+from app.core.session_paths import SESSION_DIR
 from app.models.models import (
     Account,
     Conversation,
@@ -24,10 +27,54 @@ from app.services.intelligence.pipeline import (
     classify_category,
     extract_entities,
 )
-from app.services.platform.base import AccountCredentials, MessageContent
+from app.services.platform.base import AccountCredentials, MessageContent, PlatformName
 from app.services.platform.telegram_adapter import TelegramAdapter
 
 logger = logging.getLogger(__name__)
+
+
+def _get_or_create_account_for_session(db, session_file) -> Account:
+    """sessions/ 目录里的账号在 DB 里没有对应行时补登记一条。
+
+    会话记录（conversations.account_id）是外键，没有这一行就没法落库；
+    账号列表本来就是扫描 sessions/ 目录得到的，两边应该互相对应。
+    """
+    name = session_file.stem
+    account = db.execute(
+        select(Account)
+        .where(Account.platform == Platform.TELEGRAM)
+        .where(Account.username == name)
+        .limit(1)
+    ).scalar_one_or_none()
+    if account is None:
+        account = Account(platform=Platform.TELEGRAM, username=name, credentials={}, is_active=True)
+        db.add(account)
+        db.commit()
+        db.refresh(account)
+        logger.info("已在 accounts 表登记会话账号 %s (id=%s)", name, account.id)
+    return account
+
+
+def _telegram_session_candidates(
+    account: Account | None, preferred_name: str | None = None
+) -> list:
+    """挑可用的会话文件：优先账号名对应的那个，否则按文件名顺序全试一遍。
+
+    之所以要"试一遍"，是因为 sessions/ 里可能有没登录成功的空会话文件
+    （例如群组页以前用硬编码账号名点过"加入"），按名字排序时它可能排在
+    真正的账号前面，直接把任务带进"认证失败"。
+    """
+    if preferred_name:
+        # 建任务时在界面上选的账号优先（task.config["account"]）
+        preferred = SESSION_DIR / f"{preferred_name}.session"
+        if preferred.exists():
+            return [preferred]
+        logger.warning("任务指定的账号 %s 不存在，回退到自动挑选", preferred_name)
+    if account is not None:
+        preferred = SESSION_DIR / f"{account.username}.session"
+        if preferred.exists():
+            return [preferred]
+    return sorted(SESSION_DIR.glob("*.session"))
 
 celery_app = Celery(
     "osint_worker",
@@ -46,12 +93,17 @@ celery_app.conf.update(
 )
 
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
-def run_task(self, task_id: str):
-    """Execute an OSINT gathering task. Called by the API when a task is started."""
+def _run_task_pipeline(task_id: str):
+    """任务体的真正实现。
+
+    单独抽出来是给「没有 Celery worker」的进程内直跑用：`apply()` 在 eager 模式下
+    遇到 `self.retry()` 会把整个任务体重跑一遍（最多 4 次），对会加群/私聊的任务来说
+    太危险，所以进程内路径直接调这个函数，不做重试。
+    """
     logger.info("Starting task %s", task_id)
 
     db = SessionLocal()
+    task = None
     try:
         # 1. Load task config from DB
         result = db.execute(select(Task).where(Task.id == task_id))
@@ -72,7 +124,8 @@ def run_task(self, task_id: str):
                 .limit(1)
             )
             account = result.scalar_one_or_none()
-            if not account:
+
+            if account is None and task.platform != Platform.TELEGRAM:
                 logger.warning("No active account for platform %s", task.platform)
                 task.status = TaskStatus.FAILED
                 db.commit()
@@ -80,80 +133,141 @@ def run_task(self, task_id: str):
 
             # 3. Initialize platform adapter (sync version for Celery)
             if task.platform == Platform.TELEGRAM:
-                adapter = TelegramAdapter(
-                    api_id=settings.tg_api_id,
-                    api_hash=settings.tg_api_hash,
-                    session_name=f"osint_{account.id}",
+                # 账号名对应 sessions/<username>.session 时优先用它；DB 里没账号
+                # 或者那个账号不可用时，挨个试 sessions/ 下的其它会话文件。
+                session_candidates = _telegram_session_candidates(
+                    account, (task.config or {}).get("account")
                 )
-
-                credentials = AccountCredentials(
-                    platform=account.platform.value,
-                    username=account.username,
-                    credentials=account.credentials,
-                )
-
-                # Run async authenticate in sync context
-                import asyncio
-
-                loop = asyncio.new_event_loop()
-                authenticated = loop.run_until_complete(adapter.authenticate(credentials))
-                loop.close()
-
-                if not authenticated:
-                    logger.error("Failed to authenticate account %s", account.id)
+                if not session_candidates:
+                    logger.warning("sessions/ 下没有任何会话文件，任务无法执行")
                     task.status = TaskStatus.FAILED
                     db.commit()
                     return
 
-                # 4. Search groups by keywords
-                for keyword in task.keywords[:3]:  # Limit to first 3 keywords
-                    logger.info("Searching for keyword: %s", keyword)
-                    loop = asyncio.new_event_loop()
-                    groups = loop.run_until_complete(adapter.search_groups(query=keyword, limit=5))
-                    loop.close()
+                summary = {
+                    "searched_keywords": 0,
+                    "found_groups": 0,
+                    "joined_groups": 0,
+                    "members_found": 0,
+                    "dm_failed": 0,
+                    "conversations": 0,
+                    "account": account.username if account else None,
+                    "error": None,
+                }
 
-                    for group in groups:
-                        logger.info("Found group: %s (%s members)", group.name, group.member_count)
+                async def _campaign() -> None:
+                    """整个外呼流程跑在同一个事件循环里。
 
-                        # 5. Join group
-                        loop = asyncio.new_event_loop()
-                        joined = loop.run_until_complete(adapter.join_group(group.group_id))
-                        loop.close()
-
-                        if joined:
-                            logger.info("Successfully joined group %s", group.group_id)
-
-                            # Get group members
-                            loop = asyncio.new_event_loop()
-                            members = loop.run_until_complete(
-                                adapter.get_group_members(group.group_id, limit=20)
+                    Telethon 明确要求连接期间不能更换事件循环；以前每次调用都
+                    `asyncio.new_event_loop()`，于是鉴权之后的 search/join/send
+                    全部报 "The asyncio event loop must not change after connection"，
+                    任务还照样显示"完成"。
+                    """
+                    nonlocal account
+                    adapter = None
+                    used_session = None
+                    for candidate_path in session_candidates:
+                        candidate = TelegramAdapter(
+                            api_id=settings.tg_api_id,
+                            api_hash=settings.tg_api_hash,
+                            session_name=str(candidate_path),
+                            proxy=telegram_proxy(),
+                        )
+                        if await candidate.authenticate(
+                            AccountCredentials(
+                                platform=PlatformName.TELEGRAM,
+                                username=candidate_path.stem,
+                                credentials={},
                             )
-                            loop.close()
+                        ):
+                            adapter = candidate
+                            used_session = candidate_path
+                            break
+                        # 没登录成功的空会话（例如以前用演示账号名点过"加入"生成的），
+                        # 跳过它换下一个，别让它把任务带进"认证失败"
+                        await candidate.disconnect()
 
-                            logger.info(
-                                "Retrieved %d members from group %s", len(members), group.group_id
-                            )
+                    if adapter is None or used_session is None:
+                        raise RuntimeError(
+                            "sessions/ 里没有可用的已登录账号（可能都是未登录的空会话文件），"
+                            "请先在「账号管理」里添加并确认账号可用"
+                        )
 
-                            # 6. Start conversations with selected members
-                            for member in members[:5]:  # Limit to 5 members per group
-                                conv_id = _start_conversation_sync(
-                                    db=db,
-                                    task=task,
-                                    account=account,
-                                    adapter=adapter,
-                                    target_user_id=member.user_id,
-                                    target_display_name=member.display_name,
+                    if account is None or account.username != used_session.stem:
+                        account = _get_or_create_account_for_session(db, used_session)
+                    summary["account"] = account.username
+                    logger.info("本次外呼使用账号: %s", used_session.name)
+                    try:
+                        # 4. Search groups by keywords
+                        for keyword in task.keywords[:3]:  # Limit to first 3 keywords
+                            logger.info("Searching for keyword: %s", keyword)
+                            groups = await adapter.search_groups(query=keyword, limit=5)
+                            summary["searched_keywords"] += 1
+
+                            for group in groups:
+                                summary["found_groups"] += 1
+                                logger.info(
+                                    "Found group: %s (%s members)", group.name, group.member_count
                                 )
-                                if conv_id:
-                                    logger.info(
-                                        "Started conversation %s with %s",
-                                        conv_id,
-                                        member.display_name,
-                                    )
 
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(adapter.disconnect())
-                loop.close()
+                                # 5. Join group
+                                joined = await adapter.join_group(group.group_id)
+                                if not joined:
+                                    continue
+                                summary["joined_groups"] += 1
+                                logger.info("Successfully joined group %s", group.group_id)
+
+                                # Get group members
+                                members = await adapter.get_group_members(group.group_id, limit=20)
+                                logger.info(
+                                    "Retrieved %d members from group %s",
+                                    len(members),
+                                    group.group_id,
+                                )
+                                summary["members_found"] += len(members)
+
+                                # 6. Start conversations with selected members
+                                for member in members[:5]:  # Limit to 5 members per group
+                                    # 有用户名就用 @username 私聊（数字 id 需要实体缓存，
+                                    # 拉不到成员列表时并不可靠）
+                                    target = (
+                                        f"@{member.username}"
+                                        if member.username
+                                        else member.user_id
+                                    )
+                                    conv_id = await _start_conversation(
+                                        db=db,
+                                        task=task,
+                                        account=account,
+                                        adapter=adapter,
+                                        target_user_id=target,
+                                        target_display_name=member.display_name,
+                                    )
+                                    if conv_id:
+                                        summary["conversations"] += 1
+                                        logger.info(
+                                            "Started conversation %s with %s",
+                                            conv_id,
+                                            member.display_name,
+                                        )
+                                    else:
+                                        summary["dm_failed"] += 1
+                    finally:
+                        # 一定要断开：否则 SQLite 会话文件被本进程一直占着，
+                        # 之后再跑任务/常驻服务会报 "database is locked"。
+                        await adapter.disconnect()
+
+                asyncio.run(_campaign())
+
+                # 把这次跑的结果记进 task.config，前端能看到"跑完到底做了几件事"
+                task.config = {
+                    **(task.config or {}),
+                    "last_run": {
+                        **summary,
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                }
+                db.commit()
 
             else:
                 logger.warning("Platform %s not yet implemented", task.platform)
@@ -166,14 +280,24 @@ def run_task(self, task_id: str):
 
         except Exception as e:
             logger.error("Task %s failed: %s", task_id, e, exc_info=True)
-            task.status = TaskStatus.FAILED
-            db.commit()
-            raise self.retry(exc=e)
+            if task is not None:
+                task.status = TaskStatus.FAILED
+                db.commit()
+            raise
     finally:
         db.close()
 
 
-def _start_conversation_sync(
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=300)
+def run_task(self, task_id: str):
+    """Celery 入口：失败时按 Celery 规则重试（进程内直跑请用 _run_task_pipeline）。"""
+    try:
+        return _run_task_pipeline(task_id)
+    except Exception as e:
+        raise self.retry(exc=e)
+
+
+async def _start_conversation(
     db,
     task: Task,
     account: Account,
@@ -181,7 +305,7 @@ def _start_conversation_sync(
     target_user_id: str,
     target_display_name: str,
 ) -> str | None:
-    """Start a new conversation with a target user (sync version for Celery)."""
+    """Start a new conversation with a target user."""
     try:
         # Create conversation record
         conv_id = uuid.uuid4()
@@ -212,30 +336,21 @@ def _start_conversation_sync(
             }
         )
 
-        # Generate greeting message
-        import asyncio
-
-        loop = asyncio.new_event_loop()
-        greeting, new_state = loop.run_until_complete(
-            engine.generate_response(
-                incoming_message="",  # First message, no incoming
-                persona_config=persona_config,
-                state=ConvState.GREETING,
-                category=task.category.value,
-                history=[],
-            )
+        # Generate greeting message（和 send_message 共用同一个事件循环）
+        greeting, new_state = await engine.generate_response(
+            incoming_message="",  # First message, no incoming
+            persona_config=persona_config,
+            state=ConvState.GREETING,
+            category=task.category.value,
+            history=[],
         )
-        loop.close()
 
         # Send message via adapter
-        loop = asyncio.new_event_loop()
-        sent = loop.run_until_complete(
-            adapter.send_message(
-                target_id=target_user_id,
-                content=MessageContent(text=greeting, language="vi"),
-            )
+        sent = await adapter.send_message(
+            target_id=target_user_id,
+            # 主动私聊属于"找陌生人"，走养号模块的陌生人额度
+            content=MessageContent(text=greeting, language="vi", metadata={"is_stranger": True}),
         )
-        loop.close()
 
         if sent:
             # Save outbound message
@@ -346,6 +461,7 @@ def process_incoming_message(message_data: dict):
                 api_id=settings.tg_api_id,
                 api_hash=settings.tg_api_hash,
                 session_name=f"osint_{account.id}",
+                proxy=telegram_proxy(),
             )
             loop = asyncio.new_event_loop()
             loop.run_until_complete(

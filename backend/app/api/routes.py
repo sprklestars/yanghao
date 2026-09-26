@@ -8,17 +8,26 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.core.processes import pid_alive
 from app.core.proxy import telegram_proxy
-from app.core.session_paths import SESSION_DIR, ensure_session_dir, remove_session_files
+from app.core.session_paths import (
+    SESSION_DIR,
+    ensure_session_dir,
+    is_valid_session_name,
+    remove_session_files,
+    session_in_use,
+)
 from app.models.models import (
     Conversation,
     ConversationState,
     IntelligenceRecord,
+    Message,
+    Platform,
     Task,
     TaskStatus,
 )
@@ -29,11 +38,25 @@ from app.schemas.schemas import (
     TaskCreate,
     TaskResponse,
 )
-from app.workers.tasks import run_task
+from app.workers.tasks import _run_task_pipeline, run_task
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _require_valid_session_name(name: str) -> str:
+    """统一校验会话名（它会被拼成 sessions/<name>.session 文件名）。"""
+    name = (name or "").strip()
+    if not is_valid_session_name(name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Session 名称只能用 1-48 位小写字母、数字、下划线或短横线，且必须以字母/数字开头"
+                f"（当前：{name!r}）"
+            ),
+        )
+    return name
 
 
 def _get_manager():
@@ -136,15 +159,31 @@ async def list_accounts():
 async def delete_account(account_id: str):
     """Delete an account by removing its session/cookie file."""
     deleted = []
+    locked = []
     for pattern in [
         f"{account_id}.session",
         f"{account_id}_cookies.json",
         f"{account_id}_zalo.json",
     ]:
         fpath = SESSION_DIR / pattern
-        if fpath.exists():
+        if not fpath.exists():
+            continue
+        try:
             fpath.unlink()
-            deleted.append(pattern)
+        except OSError as e:
+            # Windows 上文件被别的进程占着时删不掉（例如有残留的 Telethon 连接）
+            locked.append(f"{pattern}: {e}")
+            continue
+        deleted.append(pattern)
+    if locked:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "会话文件被其它进程占用，删不掉："
+                + "；".join(locked)
+                + "。请先停止该账号的常驻服务/等待正在跑的任务结束，必要时重启后端再删。"
+            ),
+        )
     meta_file = SESSION_DIR / f"{account_id}_meta.json"
     if meta_file.exists():
         meta_file.unlink()
@@ -314,7 +353,9 @@ async def telegram_test_connection(body: dict):
 
     from app.core.config import settings
 
-    session_name = body.get("session_name", "").strip() or "test_connection"
+    session_name = _require_valid_session_name(
+        body.get("session_name", "").strip() or "test_connection"
+    )
 
     problem = settings.telegram_credentials_error()
     if problem:
@@ -389,6 +430,7 @@ async def telegram_send_code(body: dict):
     session_name = body.get("session_name", "").strip()
     if not phone or not session_name:
         raise HTTPException(400, "请输入手机号和Session名称")
+    session_name = _require_valid_session_name(session_name)
 
     if not phone.startswith("+"):
         phone = "+" + phone
@@ -502,7 +544,9 @@ async def facebook_login_start(body: dict):
     """Launch a visible browser window for manual Facebook login."""
     import subprocess
 
-    session_name = body.get("session_name", "fb_default").strip()
+    session_name = _require_valid_session_name(
+        body.get("session_name", "fb_default").strip() or "fb_default"
+    )
 
     if session_name in _fb_login_processes:
         proc = _fb_login_processes[session_name]
@@ -542,7 +586,9 @@ async def facebook_login_start(body: dict):
 @router.post("/accounts/facebook/login-complete")
 async def facebook_login_complete(body: dict):
     """Signal that user has finished logging in; save cookies and close browser."""
-    session_name = body.get("session_name", "fb_default").strip()
+    session_name = _require_valid_session_name(
+        body.get("session_name", "fb_default").strip() or "fb_default"
+    )
 
     proc = _fb_login_processes.get(session_name)
     if proc and proc.poll() is None:
@@ -586,6 +632,7 @@ async def zalo_login(body: dict):
 
     if not phone or not password or not session_name:
         raise HTTPException(400, "phone, password, and session_name are required")
+    session_name = _require_valid_session_name(session_name)
 
     try:
         adapter = ZaloAdapter()
@@ -606,6 +653,44 @@ async def zalo_login(body: dict):
 # ── Group Management ────────────────────────────────────
 
 
+async def _open_telegram_adapter(account: str):
+    """构造并鉴权一个 Telegram 适配器。
+
+    账号不存在时直接报错：以前这里会无脑构造 TelegramClient，Telethon 立刻
+    建出 `sessions/<account>.session` 空文件，于是账号管理里凭空多出一个
+    删不掉的"幽灵账号"。
+    """
+    from app.core.config import settings
+    from app.services.platform.base import AccountCredentials, PlatformName
+    from app.services.platform.telegram_adapter import TelegramAdapter
+
+    session_file = SESSION_DIR / f"{account}.session"
+    if not session_file.exists():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"账号 {account} 不存在（找不到 sessions/{account}.session），"
+                "请先在「账号管理」里添加"
+            ),
+        )
+    adapter = TelegramAdapter(
+        api_id=settings.tg_api_id,
+        api_hash=settings.tg_api_hash,
+        session_name=str(session_file),
+        proxy=TG_PROXY,
+    )
+    ok = await adapter.authenticate(
+        AccountCredentials(platform=PlatformName.TELEGRAM, username=account, credentials={})
+    )
+    if not ok:
+        await adapter.disconnect()
+        raise HTTPException(
+            status_code=400,
+            detail=f"账号 {account} 认证失败：会话可能失效，或被常驻服务/其它进程占用",
+        )
+    return adapter
+
+
 @router.post("/groups/search")
 async def search_groups(body: dict):
     """Search Telegram groups by keyword or natural language query."""
@@ -613,8 +698,6 @@ async def search_groups(body: dict):
 
     try:
         from app.core.config import settings
-        from app.services.platform.base import AccountCredentials, PlatformName
-        from app.services.platform.telegram_adapter import TelegramAdapter
 
         query = body.get("query", "").strip()
         account = body.get("account", "printer").strip()
@@ -660,39 +743,29 @@ async def search_groups(body: dict):
                 ai_keywords = []
 
         # Search with original query + AI keywords
-        session_path = str(SESSION_DIR / account)
-        logger.info("Group search: session=%s, terms=%s", session_path, [query] + ai_keywords)
-        adapter = TelegramAdapter(
-            api_id=settings.tg_api_id,
-            api_hash=settings.tg_api_hash,
-            session_name=session_path,
-            proxy=TG_PROXY,
-        )
-        creds = AccountCredentials(platform=PlatformName.TELEGRAM, username=account, credentials={})
-
-        auth_ok = await adapter.authenticate(creds)
-        logger.info("Group search: auth_ok=%s", auth_ok)
-        if not auth_ok or not adapter._client or not adapter._client.is_connected():
-            raise HTTPException(400, f"账号 {account} 认证失败，请检查session是否有效")
+        logger.info("Group search: account=%s, terms=%s", account, [query] + ai_keywords)
+        adapter = await _open_telegram_adapter(account)
         all_results = []
         seen_ids = set()
 
         search_terms = [query] + ai_keywords
-        for term in search_terms[:5]:
-            results = await adapter.search_groups(term, limit=10)
-            for g in results:
-                if g.group_id not in seen_ids:
-                    seen_ids.add(g.group_id)
-                    all_results.append(
-                        {
-                            "group_id": g.group_id,
-                            "name": g.name,
-                            "member_count": g.member_count,
-                            "description": g.description,
-                        }
-                    )
-
-        await adapter.disconnect()
+        try:
+            for term in search_terms[:5]:
+                results = await adapter.search_groups(term, limit=10)
+                for g in results:
+                    if g.group_id not in seen_ids:
+                        seen_ids.add(g.group_id)
+                        all_results.append(
+                            {
+                                "group_id": g.group_id,
+                                "name": g.name,
+                                "member_count": g.member_count,
+                                "description": g.description,
+                            }
+                        )
+        finally:
+            # 无论成功失败都断开，否则会话文件被这个进程占着，后面全报 database is locked
+            await adapter.disconnect()
         return {"results": all_results[:20], "keywords_used": search_terms}
     except HTTPException:
         raise
@@ -704,63 +777,35 @@ async def search_groups(body: dict):
 @router.post("/groups/join")
 async def join_group(body: dict):
     """Join a Telegram group by ID."""
-    from app.core.config import settings
-    from app.services.platform.base import AccountCredentials, PlatformName
-    from app.services.platform.telegram_adapter import TelegramAdapter
-
     group_id = body.get("group_id", "").strip()
     account = body.get("account", "printer").strip()
 
     if not group_id:
         raise HTTPException(400, "group_id is required")
 
-    session_path = str(SESSION_DIR / account)
-    adapter = TelegramAdapter(
-        api_id=settings.tg_api_id,
-        api_hash=settings.tg_api_hash,
-        session_name=session_path,
-        proxy=TG_PROXY,
-    )
-    creds = AccountCredentials(platform=PlatformName.TELEGRAM, username=account, credentials={})
-
+    adapter = await _open_telegram_adapter(account)
     try:
-        await adapter.authenticate(creds)
         success = await adapter.join_group(group_id)
-        await adapter.disconnect()
         if success:
             return {"status": "joined", "group_id": group_id}
-        else:
-            return {"status": "failed", "message": "Could not join group"}
+        return {"status": "failed", "message": "Could not join group"}
     except Exception as e:
         raise HTTPException(400, f"Join group failed: {e}")
+    finally:
+        await adapter.disconnect()
 
 
 @router.post("/groups/add-by-link")
 async def add_group_by_link(body: dict):
     """Join a Telegram group by invite link or username."""
-    from app.core.config import settings
-    from app.services.platform.base import AccountCredentials, PlatformName
-    from app.services.platform.telegram_adapter import TelegramAdapter
-
     link = body.get("link", "").strip()
     account = body.get("account", "printer").strip()
 
     if not link:
         raise HTTPException(400, "link is required")
 
-    session_path = str(SESSION_DIR / account)
-    adapter = TelegramAdapter(
-        api_id=settings.tg_api_id,
-        api_hash=settings.tg_api_hash,
-        session_name=session_path,
-        proxy=TG_PROXY,
-    )
-    creds = AccountCredentials(platform=PlatformName.TELEGRAM, username=account, credentials={})
-
+    adapter = await _open_telegram_adapter(account)
     try:
-        auth_ok = await adapter.authenticate(creds)
-        if not auth_ok or not adapter._client or not adapter._client.is_connected():
-            raise HTTPException(400, f"账号 {account} 认证失败，请检查session是否有效")
         client = adapter._client
 
         # Handle t.me links or @username
@@ -778,28 +823,54 @@ async def add_group_by_link(body: dict):
 
         try:
             await client(JoinChannelRequest(entity))
-            await adapter.disconnect()
             return {"status": "joined", "group_id": group_id, "name": title}
         except Exception as join_err:
             err_str = str(join_err)
             if "already" in err_str.lower() or "USER_ALREADY_PARTICIPANT" in err_str:
-                await adapter.disconnect()
                 return {"status": "joined", "group_id": group_id, "name": title, "note": "已是成员"}
             if "successfully requested" in err_str.lower():
-                await adapter.disconnect()
                 return {
                     "status": "joined",
                     "group_id": group_id,
                     "name": title,
                     "note": "已发送加入申请，等待审批",
                 }
-            await adapter.disconnect()
             return {"status": "failed", "message": f"加入失败: {err_str}"}
     except Exception as e:
         raise HTTPException(400, f"Add group failed: {e}")
+    finally:
+        await adapter.disconnect()
 
 
 # ── Tasks ──────────────────────────────────────────────
+
+
+def _has_celery_worker(timeout: float = 0.5) -> bool:
+    """探测是否有在线的 Celery worker（探测不到就走进程内执行）。"""
+    try:
+        from app.workers.tasks import celery_app
+
+        return bool(celery_app.control.ping(timeout=timeout))
+    except Exception as e:
+        logger.warning("Celery worker 探测失败: %s", e)
+        return False
+
+
+async def _ensure_celery_worker() -> bool:
+    """没有 worker 就自动拉起一个（和常驻服务用同一套启动逻辑）。"""
+    if _has_celery_worker(timeout=1.0):
+        return True
+    try:
+        await start_service("worker")
+    except HTTPException as e:
+        logger.warning("自动启动 Celery worker 失败: %s", e.detail)
+        return False
+    # worker 起来后要几秒才会应答 ping
+    for _ in range(4):
+        if _has_celery_worker(timeout=1.5):
+            return True
+        await asyncio.sleep(1.0)
+    return False
 
 
 @router.post("/tasks", response_model=TaskResponse)
@@ -831,36 +902,130 @@ async def create_task(body: TaskCreate, db: AsyncSession = Depends(get_db)):
 
 @router.post("/tasks/{task_id}/start")
 async def start_task(task_id: str, db: AsyncSession = Depends(get_db)):
-    """Start executing a task by dispatching to Celery worker."""
-    result = await db.execute(select(Task).where(Task.id == task_id))
+    """Start executing a task.
+
+    优先派发给 Celery worker；本机没起 worker（很常见）时退化为在当前进程里直接跑，
+    否则任务只会挂在"运行中"永远不动。
+    """
+    try:
+        task_uuid = uuid.UUID(str(task_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="任务 ID 格式不正确")
+
+    result = await db.execute(select(Task).where(Task.id == task_uuid))
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    if task.status in [TaskStatus.RUNNING, TaskStatus.PENDING]:
-        raise HTTPException(status_code=400, detail="Task already running or pending")
+    # 只有"正在运行"才拦。PENDING 是新建任务的初始状态（界面上叫"等待中"），
+    # 之前把它一并当成"已在运行"拒绝，导致新建的任务永远点不动启动。
+    if task.status == TaskStatus.RUNNING:
+        raise HTTPException(status_code=400, detail="任务已在运行中")
 
-    # Dispatch to Celery
-    run_task.delay(task_id=str(task_id))
+    # 三平台一致：只有 Telegram 的外呼流水线真的实现了，别让 Facebook/Zalo 的任务
+    # 点下去静默变成"暂停"（那是以前最难排查的一种"没反应"）
+    if task.platform != Platform.TELEGRAM:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{task.platform.value} 的外呼任务流水线尚未接入（当前只有 Telegram 支持），"
+                "该任务无法启动"
+            ),
+        )
+
+    # 常驻服务（persistent_chat_demo.py）和任务流水线用的是同一个 .session 文件，
+    # Telegram 同一账号不能同时开两个客户端：抢同一份 SQLite 会 "database is locked"。
+    if task.platform.value == "telegram":
+        info = SERVICE_MAP["telegram"]
+        if _is_running(_read_pid(BACKEND_DIR / info["pid_file"])):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Telegram 常驻服务正在运行，它占用了同一个账号的会话文件。"
+                    "请先到「账号管理」页点「停止」，再启动任务。"
+                ),
+            )
+        busy = next(
+            (p.stem for p in sorted(SESSION_DIR.glob("*.session")) if session_in_use(p)), None
+        )
+        if busy:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"账号 {busy} 的会话文件正被另一个进程占用（SQLite 锁）。"
+                    "常见原因是之前有过没正常结束的客户端：请关掉多余的后端进程、"
+                    "重启当前后端后再启动任务。"
+                ),
+            )
+
+    # 优先走 Celery；本机没起 worker 时自动拉起一个，仍然不行就在进程内直跑，
+    # 这样用户不必自己再开第三个终端（有 worker 才是"正规军"模式）。
+    mode = "celery"
+    if await _ensure_celery_worker():
+        try:
+            run_task.delay(task_id=str(task_uuid))
+        except Exception as e:
+            logger.warning("Celery 派发失败，改为进程内执行: %s", e)
+            mode = "inline"
+    else:
+        logger.warning("Celery worker 不可用，任务 %s 改为进程内执行", task_uuid)
+        mode = "inline"
+
+    if mode == "inline":
+        # 直接跑任务体（不是 run_task.apply）：eager 模式下 Celery 的 self.retry()
+        # 会把整个任务体重跑最多 4 次，对会加群/私聊的任务太危险。
+        asyncio.get_running_loop().run_in_executor(None, _run_task_pipeline, str(task_uuid))
 
     task.status = TaskStatus.RUNNING
     await db.commit()
 
     # Notify via WebSocket
     await _get_manager().send_to_task(
-        task_id,
+        str(task_uuid),
         {
             "type": "task_started",
             "task_id": task_id,
         },
     )
 
-    return {"status": "started", "task_id": task_id}
+    return {"status": "started", "task_id": str(task_uuid), "mode": mode}
+
+
+@router.delete("/tasks/{task_id}")
+async def delete_task(task_id: str, db: AsyncSession = Depends(get_db)):
+    """删除任务及其从属会话、消息、情报记录。"""
+    try:
+        task_uuid = uuid.UUID(str(task_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="任务 ID 格式不正确")
+
+    result = await db.execute(select(Task).where(Task.id == task_uuid))
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # 表间外键没有 ondelete cascade，得按依赖顺序手工删干净，否则会报外键冲突。
+    conv_ids = (
+        (await db.execute(select(Conversation.id).where(Conversation.task_id == task_uuid)))
+        .scalars()
+        .all()
+    )
+    if conv_ids:
+        await db.execute(delete(Message).where(Message.conversation_id.in_(conv_ids)))
+        await db.execute(delete(Conversation).where(Conversation.id.in_(conv_ids)))
+    await db.execute(delete(IntelligenceRecord).where(IntelligenceRecord.task_id == task_uuid))
+    await db.execute(delete(Task).where(Task.id == task_uuid))
+    await db.commit()
+
+    return {"status": "deleted", "task_id": str(task_uuid)}
 
 
 @router.get("/tasks", response_model=list[TaskResponse])
 async def list_tasks(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Task).order_by(Task.created_at.desc()))
+    # 排除 persist_message() 自动建的容器任务（Auto-<平台>）：它们不是用户创建的任务，
+    # 只是为了让守护进程收发的消息有地方挂 conversation 而已。
+    result = await db.execute(
+        select(Task).where(~Task.name.like("Auto-%")).order_by(Task.created_at.desc())
+    )
     return result.scalars().all()
 
 
@@ -988,13 +1153,35 @@ SERVICE_MAP = {
         "script": "persistent_chat_demo.py",
         "pid_file": "chat_demo.pid",
         "log_file": "logs/chat_demo.log",
+        "label": "Telegram 常驻在线服务",
     },
     "facebook": {
         "script": "persistent_facebook_demo.py",
         "pid_file": "facebook_demo.pid",
         "log_file": "logs/facebook_demo.log",
+        "label": "Facebook 常驻在线服务",
+    },
+    # 任务队列的消费者。以前要用户自己另开一个终端跑 celery，没跑就成了
+    # 「未检测到 Celery worker」——现在和常驻服务一样由 API 管理。
+    "worker": {
+        "script": "",
+        "pid_file": "celery_worker.pid",
+        "log_file": "logs/celery_worker.log",
+        "label": "任务调度器（Celery Worker）",
+        "command": [
+            "-m",
+            "celery",
+            "-A",
+            "app.workers.tasks",
+            "worker",
+            "--loglevel=info",
+            "--pool=solo" if os.name == "nt" else "--pool=prefork",
+        ],
     },
 }
+
+# 常驻服务当前挂的账号（sessions/ 下的会话名），供状态展示和冲突提示用
+SERVICE_SESSION_FILE = BACKEND_DIR / "chat_demo.session"
 
 
 def _read_pid(pid_file: Path) -> int | None:
@@ -1007,13 +1194,51 @@ def _read_pid(pid_file: Path) -> int | None:
 
 
 def _is_running(pid: int | None) -> bool:
-    if pid is None:
-        return False
+    # 注意：Windows 上 os.kill(pid, 0) 会 TerminateProcess，等于把服务杀掉，
+    # 所以存活检测统一走 app/core/processes.pid_alive（跨平台）。
+    return pid_alive(pid)
+
+
+def _tail_lines(path: Path, count: int) -> list[str]:
+    if not path.exists():
+        return []
     try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
+        lines = path.read_text(encoding="utf-8", errors="replace").strip().split("\n")
+    except OSError:
+        return []
+    return lines[-count:]
+
+
+def _first_session_name() -> str | None:
+    """sessions/ 目录里的第一个会话名（账号列表的 id）。"""
+    files = sorted(SESSION_DIR.glob("*.session"))
+    return files[0].stem if files else None
+
+
+async def _first_authorized_session() -> str | None:
+    """挑一个**真正登录过**的会话。
+
+    sessions/ 里可能残留没登录成功的空会话文件（例如以前群组页用演示账号名
+    点过"加入"），它们的认证必然是失败的，常驻服务挂上去只会一直重连。
+    """
+    for path in sorted(SESSION_DIR.glob("*.session")):
+        adapter = None
+        try:
+            adapter = await _open_telegram_adapter(path.stem)
+            return path.stem
+        except HTTPException:
+            continue
+        finally:
+            if adapter is not None:
+                await adapter.disconnect()
+    return None
+
+
+def _service_running(platform: str) -> bool:
+    info = SERVICE_MAP.get(platform)
+    if not info:
         return False
+    return _is_running(_read_pid(BACKEND_DIR / info["pid_file"]))
 
 
 @router.get("/services/status")
@@ -1024,20 +1249,32 @@ async def get_services_status():
         pid_file = BACKEND_DIR / info["pid_file"]
         pid = _read_pid(pid_file)
         running = _is_running(pid)
-        statuses.append(
-            {
-                "platform": platform,
-                "running": running,
-                "pid": pid if running else None,
-                "script": info["script"],
-            }
-        )
+        entry = {
+            "platform": platform,
+            "label": info.get("label", platform),
+            "running": running,
+            "pid": pid if running else None,
+            "script": info["script"] or "celery worker",
+        }
+        if platform == "telegram":
+            entry["session"] = (
+                SERVICE_SESSION_FILE.read_text(encoding="utf-8").strip()
+                if SERVICE_SESSION_FILE.exists()
+                else None
+            )
+        statuses.append(entry)
     return statuses
 
 
 @router.post("/services/{platform}/start")
-async def start_service(platform: str):
-    """Start a persistent chat service for the given platform."""
+async def start_service(
+    platform: str, session: str | None = None, db: AsyncSession = Depends(get_db)
+):
+    """Start a persistent chat service for the given platform.
+
+    ``session`` 是要挂载的账号（sessions/ 下的会话名）；Telegram 常驻进程一次只跑
+    一个账号，不传时用目录里的第一个，避免它默默去用并不存在的旧会话。
+    """
     if platform not in SERVICE_MAP:
         raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
 
@@ -1049,25 +1286,96 @@ async def start_service(platform: str):
     if _is_running(pid):
         return {"status": "already_running", "pid": pid, "platform": platform}
 
-    if not script.exists():
+    command = info.get("command")
+    if command is None and not script.exists():
         raise HTTPException(status_code=404, detail=f"Script not found: {script.name}")
 
     log_file = BACKEND_DIR / info["log_file"]
     log_file.parent.mkdir(exist_ok=True)
 
-    with open(log_file, "a") as lf:
+    env = os.environ.copy()
+    # 子进程的 stdout/stderr 也按 UTF-8 写日志：Windows 默认是 cp936，
+    # 中文/emoji 落盘后前端按 UTF-8 读会变成乱码。
+    env["PYTHONUTF8"] = "1"
+    if platform == "telegram":
+        # 任务外呼和常驻服务都要独占账号的 .session 文件，必须互斥
+        running_task = (
+            await db.execute(
+                select(Task)
+                .where(Task.platform == Platform.TELEGRAM)
+                .where(Task.status == TaskStatus.RUNNING)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if running_task is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"有 Telegram 任务正在运行（{running_task.name}）。"
+                    "任务外呼和常驻在线服务不能同时占用同一个账号，"
+                    "请等任务结束或先在任务页删除它。"
+                ),
+            )
+        chosen = session or await _first_authorized_session()
+        if not chosen:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    '没有可用的 Telegram 账号：sessions/ 里没有会话，或现存会话都没登录成功。'
+                    '请先点"+ 添加账号"完成一次登录'
+                ),
+            )
+        if not (SESSION_DIR / f"{chosen}.session").exists():
+            raise HTTPException(status_code=400, detail=f"会话 {chosen} 不存在，请先完成登录")
+        env["TG_SESSION_NAME"] = chosen
+
+    # Windows 没有 setsid；用 DETACHED_PROCESS 让守护进程不随 API 进程退出。
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = (
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        )
+
+    with open(log_file, "a", encoding="utf-8") as lf:
         proc = subprocess.Popen(
-            [sys.executable, str(script), "start"],
+            [sys.executable, *(command or [str(script), "start"])],
             cwd=str(BACKEND_DIR),
             stdout=lf,
             stderr=lf,
             start_new_session=True,
+            creationflags=creationflags,
+            env=env,
         )
+
+    if command is not None:
+        # celery 自己不写 pid 文件，由我们记录，status/stop 才认得出它
+        pid_file.write_text(str(proc.pid), encoding="utf-8")
+    if platform == "telegram":
+        SERVICE_SESSION_FILE.write_text(env.get("TG_SESSION_NAME", ""), encoding="utf-8")
 
     await asyncio.sleep(2)
 
+    if proc.poll() is not None:
+        # 子进程启动即退出（依赖缺失、凭证/代理没配好等）。以前这里照样回
+        # "started"，前端看不出问题，只表现为「按钮没反应」。
+        tail = "\n".join(_tail_lines(log_file, 15))
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"{info.get('label', info['script'])} 启动后立即退出"
+                f"（exit code {proc.returncode}）。"
+                f"最近日志：\n{tail}"
+            ),
+        )
+
     new_pid = _read_pid(pid_file) or proc.pid
-    return {"status": "started", "pid": new_pid, "platform": platform}
+    return {
+        "status": "started",
+        "pid": new_pid,
+        "platform": platform,
+        "session": env.get("TG_SESSION_NAME"),
+    }
 
 
 @router.post("/services/{platform}/stop")
@@ -1083,6 +1391,8 @@ async def stop_service(platform: str):
     if not _is_running(pid):
         if pid_file.exists():
             pid_file.unlink()
+        if platform == "telegram" and SERVICE_SESSION_FILE.exists():
+            SERVICE_SESSION_FILE.unlink()
         return {"status": "not_running", "platform": platform}
 
     try:
@@ -1092,6 +1402,8 @@ async def stop_service(platform: str):
 
     if pid_file.exists():
         pid_file.unlink()
+    if platform == "telegram" and SERVICE_SESSION_FILE.exists():
+        SERVICE_SESSION_FILE.unlink()
 
     return {"status": "stopped", "pid": pid, "platform": platform}
 

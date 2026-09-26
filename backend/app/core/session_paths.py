@@ -5,10 +5,21 @@ Telethon 在 **构造 TelegramClient 的那一瞬间** 就会创建 SQLite 会�
 ``sqlite3.OperationalError: unable to open database file``。
 """
 
+import re
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 SESSION_DIR = BACKEND_DIR / "sessions"
+
+# 会话名会直接拼成文件名（sessions/<name>.session），必须限定字符集，
+# 否则 "..\..\x" 这种输入能写到目录外面去。前端的"添加账号"也用同一套规则。
+SESSION_NAME_PATTERN = r"[a-z0-9][a-z0-9_-]{0,47}"
+_SESSION_NAME_RE = re.compile(rf"^{SESSION_NAME_PATTERN}$")
+
+
+def is_valid_session_name(name: str) -> bool:
+    """会话名是否合法：1-48 位小写字母/数字/下划线/短横线，且不能以符号开头。"""
+    return bool(_SESSION_NAME_RE.fullmatch(name or ""))
 
 
 def ensure_session_dir(session_path: str | Path | None = None) -> Path:
@@ -51,3 +62,39 @@ def remove_session_files(session_path: str | Path) -> list[Path]:
             continue
         removed.append(path)
     return removed
+
+
+def session_in_use(session_path: str | Path) -> bool:
+    """会话文件是否被别的连接/进程占用（SQLite 写锁）。
+
+    一个 `.session` 同一时刻只能被一个客户端用：常驻服务、任务流水线、或者
+    「上次运行没关干净的残留连接」都会让它一直锁着，表现就是别人一用就报
+    `sqlite3.OperationalError: database is locked`。
+    """
+    base = Path(str(session_path))
+    path = base if base.suffix == ".session" else Path(f"{base}.session")
+    if not path.exists():
+        return False
+
+    # Windows 上还可能被别的进程占着句柄（删不掉、但 SQLite 未必报锁），
+    # 所以先试一次普通读写打开。
+    try:
+        with open(path, "r+b"):
+            pass
+    except OSError:
+        return True
+
+    import sqlite3
+
+    try:
+        con = sqlite3.connect(f"file:{path.as_posix()}?mode=rw", uri=True, timeout=0.3)
+    except sqlite3.Error:
+        return False
+    try:
+        con.execute("BEGIN IMMEDIATE")  # 拿不到写锁就说明有人在用
+        con.execute("ROLLBACK")
+    except sqlite3.Error:
+        return True
+    finally:
+        con.close()
+    return False

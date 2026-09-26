@@ -59,9 +59,13 @@ export interface PersonaPreset {
 
 export interface ServiceStatus {
   platform: string;
+  /** 服务的中文名，例如「Telegram 常驻在线服务」 */
+  label?: string;
   running: boolean;
   pid?: number | null;
   script?: string;
+  /** 仅常驻在线服务：它当前挂载的账号（sessions/ 下的会话名） */
+  session?: string | null;
 }
 
 export interface Task {
@@ -72,6 +76,20 @@ export interface Task {
   keywords: string[];
   target_region?: string | null;
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | string;
+  /** 含 last_run 摘要：searched_keywords / found_groups / joined_groups / conversations */
+  config?: {
+    last_run?: {
+      account?: string | null;
+      searched_keywords?: number;
+      found_groups?: number;
+      joined_groups?: number;
+      members_found?: number;
+      conversations?: number;
+      finished_at?: string;
+      error?: string | null;
+    };
+    [key: string]: unknown;
+  };
   /** 后端 TaskResponse 必返，页面会直接 new Date() 用它 */
   created_at: string;
   updated_at: string;
@@ -469,9 +487,9 @@ export const accountAPI = {
 export const serviceAPI = {
   status: () => fetchAPI<ServiceStatus[]>('/services/status'),
 
-  start: (platform: string) =>
+  start: (platform: string, session?: string) =>
     fetchAPI<{ status: string; pid?: number; platform: string }>(
-      `/services/${platform}/start`,
+      `/services/${platform}/start${session ? `?session=${encodeURIComponent(session)}` : ''}`,
       { method: 'POST', timeout: 30000 },
     ),
 
