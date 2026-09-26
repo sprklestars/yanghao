@@ -283,6 +283,13 @@ manager = ConnectionManager()
 async def lifespan(app: FastAPI):
     # startup: init connections, warm up caches
     logger.info("OSINT Platform API starting up")
+    if settings.api_token:
+        logger.info("API 鉴权已开启：/api/v1/* 需要 Bearer token，/ws 需要 ?token=")
+    else:
+        logger.warning(
+            "API 鉴权未开启（API_TOKEN 为空）：仅适合本机使用，"
+            "不要把这个端口暴露到局域网/公网"
+        )
     yield
     # shutdown: close connections
     logger.info("OSINT Platform API shutting down")
@@ -309,6 +316,46 @@ app.add_middleware(
 )
 
 
+def _cors_headers_for(request: Request) -> dict | None:
+    """本机来源才回跨域头（与 CORSMiddleware 的规则保持一致）。"""
+    origin = request.headers.get("origin")
+    if origin and re.match(LOCAL_ORIGIN_REGEX, origin):
+        return {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
+    return None
+
+
+def _token_from(request: Request | None = None, websocket: WebSocket | None = None) -> str:
+    """从 Authorization / X-API-Token / 查询参数里取访问令牌。"""
+    headers = request.headers if request is not None else websocket.headers
+    auth = headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    token = headers.get("x-api-token")
+    if token:
+        return token.strip()
+    if websocket is not None:
+        return (websocket.query_params.get("token") or "").strip()
+    return ""
+
+
+@app.middleware("http")
+async def require_api_token(request: Request, call_next):
+    """API_TOKEN 非空时，/api/* 一律要求令牌；/health 与静态路径放行。"""
+    if not settings.api_token or not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    if request.method == "OPTIONS":  # 预检请求不带自定义头，必须放行
+        return await call_next(request)
+    if _token_from(request=request) == settings.api_token:
+        return await call_next(request)
+    return JSONResponse(
+        status_code=401,
+        content={
+            "detail": "缺少或错误的访问令牌：请在请求头带 Authorization: Bearer <API_TOKEN>"
+        },
+        headers=_cors_headers_for(request),  # 手工补跨域头，前端才读得到这个 401
+    )
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """未处理异常也要带上跨域头，否则前端只能看到一句误导性的"无法连接后端服务"。
@@ -320,16 +367,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     并把异常信息返回给前端，便于定位问题。
     """
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
-    origin = request.headers.get("origin")
-    headers = (
-        {"Access-Control-Allow-Origin": origin}
-        if origin and re.match(LOCAL_ORIGIN_REGEX, origin)
-        else None
-    )
     return JSONResponse(
         status_code=500,
         content={"detail": f"{type(exc).__name__}: {exc}"},
-        headers=headers,
+        headers=_cors_headers_for(request),
     )
 
 
@@ -340,6 +381,12 @@ app.include_router(export_router, prefix="/api/v1")
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates."""
+    if settings.api_token and _token_from(websocket=websocket) != settings.api_token:
+        # 1008 = policy violation；不回任何数据，直接关闭
+        await websocket.close(code=1008)
+        logger.warning("WebSocket 拒绝未授权连接（缺少或错误的 token）")
+        return
+
     channel = "global"
 
     # Accept query parameter for channel subscription

@@ -14,9 +14,14 @@
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
+// 后端开启 API_TOKEN 时，这里配同一个值（留空=不鉴权，本机开发默认）
+export const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN || '';
+
 export const WS_URL =
   process.env.NEXT_PUBLIC_WS_URL ||
-  `${API_BASE.replace(/^http/, 'ws').replace(/\/api\/v1\/?$/, '')}/ws`;
+  `${API_BASE.replace(/^http/, 'ws').replace(/\/api\/v1\/?$/, '')}/ws${
+    API_TOKEN ? `?token=${encodeURIComponent(API_TOKEN)}` : ''
+  }`;
 
 // ─────────────────────────────────────────────────────
 // 类型定义（与 backend/app/schemas/schemas.py 对齐）
@@ -229,6 +234,7 @@ export async function fetchAPI<T = any>(
       ...rest,
       headers: {
         'Content-Type': 'application/json',
+        ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
         ...(headers || {}),
       },
       signal: controller.signal,
@@ -276,7 +282,12 @@ export async function fetchAPI<T = any>(
  */
 export async function downloadExport(path: string): Promise<void> {
   const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
-  const response = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
+  const response = await fetch(url, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+    },
+  });
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {

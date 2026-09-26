@@ -98,7 +98,10 @@ logger = logging.getLogger(__name__)
 # PID文件
 PID_FILE = Path(__file__).parent / "chat_demo.pid"
 
-WS_URL = "ws://localhost:8000/ws"
+WS_URL = (
+    "ws://localhost:8000/ws"
+    + (f"?token={settings.api_token}" if settings.api_token else "")
+)
 
 
 class WSBridge:

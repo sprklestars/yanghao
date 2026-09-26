@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # Security
     secret_key: str = "change-me"
     access_token_expire_minutes: int = 1440
+    # API 访问令牌：留空 = 不鉴权（本机开发的默认状态）。
+    # 一旦在 .env 里填了 API_TOKEN，所有 /api/v1/* 请求都必须带
+    # Authorization: Bearer <token>（或 X-API-Token），/ws 需带 ?token=。
+    api_token: str = ""
 
     # App
     app_env: str = "development"

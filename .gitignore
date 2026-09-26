@@ -71,8 +71,8 @@ desktop.ini
 # Playwright
 .playwright/
 
-# Node modules (frontend)
-frontend/node_modules/
+# Node modules（任意层级：根目录、frontend 或以后新增的子项目都覆盖）
+node_modules/
 frontend/.next/
 frontend/out/
 # TypeScript 增量编译缓存（tsc --noEmit / next build 会生成）

@@ -310,7 +310,9 @@ mypy .
 
 ## 10. 配置与环境变量（`backend/.env`）
 
-`DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL`、`TG_API_ID` / `TG_API_HASH`、`DATABASE_URL`（异步，`postgresql+asyncpg://`）/ `DATABASE_URL_SYNC`（`postgresql://`）、`REDIS_URL`、`SECRET_KEY`、`ACCESS_TOKEN_EXPIRE_MINUTES`、`APP_ENV`、`LOG_LEVEL`。
+`DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL`、`TG_API_ID` / `TG_API_HASH`、`TG_PROXY_URL`、`DATABASE_URL`（异步，`postgresql+asyncpg://`）/ `DATABASE_URL_SYNC`（`postgresql://`）、`REDIS_URL`、`SECRET_KEY`、`ACCESS_TOKEN_EXPIRE_MINUTES`、`APP_ENV`、`LOG_LEVEL`。
+
+**`API_TOKEN`（默认空）**：非空时 `/api/v1/*` 要 `Authorization: Bearer <token>`（或 `X-API-Token`），`/ws` 要 `?token=`；前端配 `NEXT_PUBLIC_API_TOKEN`、守护进程自动读取同一个值。本机开发默认留空（启动日志会提醒"未开鉴权"）。
 
 **Telegram 代理**：统一从 `.env` 的 `TG_PROXY_URL` 读取（`app/core/proxy.py` 解析成 Telethon 的 `proxy` 参数），默认 `socks5://127.0.0.1:7890`，**留空即直连**。`routes.py` 的 `TG_PROXY`、`quick_login.py`、`login_printer.py`、`persistent_chat_demo.py`、`live_chat_demo.py` 都走它，不再各写各的。
 
@@ -393,6 +395,8 @@ mypy .
 24. **风控三件套 + 养号档案接线（P0-3 之后那一项）**：① **平台限流** `RateLimiter.allow(platform, actions, account)` —— 一次动作同时受"每小时/每天"两个额度约束时，**全部通过才计数**（否则会出现小时额度被扣、天额度没通过的错账）；适配器在加群/发消息/加好友前调用，超限就跳过并记一次健康失败。② **健康监控** `health_monitor` 记录每次动作成败，`evaluate()` 的结论（green/yellow/red/black）会写回 `sessions/<账号>_meta.json` 的 `health`，前端徽章和 `check-session` 看到的是同一份数据；连续 5 次失败→black、错误率≥0.2→red、>0.1 或日动作>50→yellow。③ **话术库** `script_library` 在 `engine.py` 里预加载：按 stage+分类+vi 挑一条作为 prompt 里的"参考说法"（要求模型改写而非照抄），LLM 调用失败时直接用该模板兜底并 `record_usage`（A/B 的 effectiveness 会随使用更新）。④ **养号档案**：`AccountWarmingManager` 改用 `backend/state/warming_profiles.json`（与黑名单同一套 `JsonStore`：跨进程可见、重启不丢），适配器鉴权成功后用**会话文件 mtime**近似注册时间自动建档案，数字限额（日加群/发消息/陌生人/好友请求）这才真正生效；档案里的 `enforce_setup_check` 决定是否强制"新号 5 项自检"——**自动创建的档案默认 False**（只套数字限额，避免刚接入就卡死存量账号），显式 `create_profile()` 默认 True，可用 `PATCH /accounts/{id}/warming` 改；同接口还支持 `created_at` 纠正账号年龄。新增 `GET/PATCH /accounts/{id}/warming`。测试隔离：`tests/test_account_warming.py` 用 fixture 把默认路径指到 tmp，避免污染真实 state。
 
 ---
+
+25. **API 鉴权 + 路由层集成测试（第 5 项）**：新增 `API_TOKEN` 配置（`.env`，默认空=不鉴权，启动时会打一条"未开鉴权、别暴露到公网"的告警）。非空时 `/api/v1/*` 必须带 `Authorization: Bearer <token>` 或 `X-API-Token`，`/ws` 必须带 `?token=`（HTTP 中间件在 `main.py`，WS 在握手处校验，不通过直接 close 1008）；`/health` 与 CORS 预检始终放行。401 响应**手工补了跨域头**（否则浏览器只报"后端不可达"），前端 `fetchAPI`/`downloadExport` 会带 `NEXT_PUBLIC_API_TOKEN`，守护进程的 `WS_URL` 也会自动带 token。新增 `tests/test_api_auth.py`：这是仓库里第一批**接口层**测试（用 `TestClient`，导入前塞假 DSN 以免没 .env 的环境在收集阶段炸），覆盖鉴权关闭/开启、Bearer 与 X-API-Token、401 的跨域头、预检放行，以及 `/services/status` 的真实响应形状。
 
 ## 12. 文档索引（均在仓库根目录）
 
