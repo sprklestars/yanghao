@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { fetchAPI, type IntelligenceRecord } from '@/lib/api';
+import { downloadExport, fetchAPI, type IntelligenceRecord } from '@/lib/api';
 
 export default function IntelligencePage() {
   const [records, setRecords] = useState<IntelligenceRecord[]>([]);
@@ -30,6 +30,17 @@ export default function IntelligencePage() {
     }
   }
 
+  async function exportRecords(fmt: string) {
+    const params = new URLSearchParams({ format: fmt });
+    if (filters.category) params.set('category', filters.category);
+    if (filters.platform) params.set('platform', filters.platform);
+    try {
+      await downloadExport(`/export/intelligence?${params}`);
+    } catch (e: any) {
+      alert(`导出失败：${e?.message || '请检查后端服务'}`);
+    }
+  }
+
   return (
     <div className="flex flex-col h-[calc(100vh-3rem)]">
       {backendError && (
@@ -38,7 +49,20 @@ export default function IntelligencePage() {
         </div>
       )}
 
-      <h2 className="text-2xl font-bold mb-4">Intelligence Records</h2>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-2xl font-bold">Intelligence Records</h2>
+        <div className="flex gap-2">
+          {(['csv', 'json', 'xlsx'] as const).map((fmt) => (
+            <button
+              key={fmt}
+              onClick={() => exportRecords(fmt)}
+              className="px-3 py-1.5 rounded text-xs font-medium bg-slate-900 text-white hover:bg-slate-800"
+            >
+              导出 {fmt.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="flex gap-3 mb-4 items-end">
         <select
@@ -84,7 +108,14 @@ export default function IntelligencePage() {
           {records.map((r) => (
             <tr key={r.id} className="border-t">
               <td className="px-4 py-2">{r.display_name || r.target_user_id}</td>
-              <td className="px-4 py-2 capitalize">{r.platform}</td>
+              <td className="px-4 py-2">
+                <span className="capitalize">{r.platform}</span>
+                {r.platforms && r.platforms.length > 1 && (
+                  <span className="ml-1 text-xs text-amber-600" title={`跨平台命中：${r.platforms.join(', ')}`}>
+                    🔗{r.platforms.length}
+                  </span>
+                )}
+              </td>
               <td className="px-4 py-2">{r.category.replace(/_/g, ' ')}</td>
               <td className="px-4 py-2">{(r.confidence * 100).toFixed(0)}%</td>
               <td className="px-4 py-2">

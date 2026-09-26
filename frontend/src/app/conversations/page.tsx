@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { fetchAPI, type Conversation, wsClient } from '@/lib/api';
+import { downloadExport, fetchAPI, type Conversation, wsClient } from '@/lib/api';
 
 interface LiveMessage {
   id: string;
@@ -38,6 +38,14 @@ export default function ConversationsPage() {
       setBackendError(e?.message || '后端不可达');
     }
     setLoaded(true);
+  }
+
+  async function exportConversations(fmt: string) {
+    try {
+      await downloadExport(`/export/conversations?format=${fmt}`);
+    } catch (e: any) {
+      alert(`导出失败：${e?.message || '请检查后端服务'}`);
+    }
   }
 
   useEffect(() => {
@@ -101,9 +109,26 @@ export default function ConversationsPage() {
           <div className="flex-1 bg-white rounded shadow overflow-hidden flex flex-col min-h-0">
             <div className="p-3 border-b flex items-center justify-between">
               <h3 className="font-semibold text-sm">历史对话</h3>
-              <button onClick={loadConversations} className="text-xs text-blue-600 hover:underline">
-                {loaded ? '刷新' : '加载'}
-              </button>
+              <div className="flex items-center gap-2">
+                <select
+                  className="border px-2 py-1 rounded text-xs"
+                  defaultValue="csv"
+                  onChange={(e) => {
+                    exportConversations(e.target.value);
+                    e.target.value = '';
+                  }}
+                >
+                  <option value="" disabled>
+                    导出…
+                  </option>
+                  <option value="csv">CSV</option>
+                  <option value="json">JSON</option>
+                  <option value="xlsx">Excel</option>
+                </select>
+                <button onClick={loadConversations} className="text-xs text-blue-600 hover:underline">
+                  {loaded ? '刷新' : '加载'}
+                </button>
+              </div>
             </div>
             <div className="flex-1 overflow-y-auto">
               {!loaded && <p className="p-3 text-gray-500 text-sm">点击加载获取对话列表</p>}

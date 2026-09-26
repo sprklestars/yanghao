@@ -57,6 +57,7 @@ class MessageResponse(BaseModel):
 class ConversationResponse(BaseModel):
     id: uuid.UUID
     account_id: uuid.UUID
+    account_name: str | None = None
     task_id: uuid.UUID
     target_user_id: str
     target_display_name: str | None
@@ -88,6 +89,7 @@ class IntelligenceResponse(BaseModel):
     last_seen: datetime | None
     response_rate: float | None
     review_status: ReviewStatus
+    platforms: list[str] | None = None
     operator_notes: str | None
     collected_at: datetime
 

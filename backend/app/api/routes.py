@@ -27,6 +27,7 @@ from app.models.models import (
     ConversationState,
     IntelligenceRecord,
     Message,
+    MessageDirection,
     Platform,
     Task,
     TaskStatus,
@@ -1100,7 +1101,9 @@ async def list_conversations(
     task_id: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    query = select(Conversation).options(selectinload(Conversation.messages))
+    query = select(Conversation).options(
+        selectinload(Conversation.messages), selectinload(Conversation.account)
+    )
     if task_id:
         query = query.where(Conversation.task_id == task_id)
     query = query.order_by(Conversation.started_at.desc())
@@ -1112,13 +1115,75 @@ async def list_conversations(
 async def get_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Conversation)
-        .options(selectinload(Conversation.messages))
+        .options(selectinload(Conversation.messages), selectinload(Conversation.account))
         .where(Conversation.id == conv_id)
     )
     conv = result.scalar_one_or_none()
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conv
+
+
+@router.post("/conversations/{conv_id}/reply")
+async def reply_conversation(conv_id: str, body: dict, db: AsyncSession = Depends(get_db)):
+    """人工回复：用会话所属账号给目标发一条消息，并落库（供 live-chat 页使用）。"""
+    from app.services.platform.base import MessageContent
+
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="回复内容不能为空")
+    try:
+        conv_uuid = uuid.UUID(str(conv_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="会话 ID 格式不正确")
+
+    conv = (
+        await db.execute(
+            select(Conversation)
+            .options(selectinload(Conversation.account))
+            .where(Conversation.id == conv_uuid)
+        )
+    ).scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    account_name = conv.account_name
+    if not account_name:
+        raise HTTPException(status_code=400, detail="会话没有关联账号，无法发送")
+    session_file = SESSION_DIR / f"{account_name}.session"
+    if not session_file.exists():
+        raise HTTPException(
+            status_code=400, detail=f"账号 {account_name} 的会话文件不存在，请先添加账号"
+        )
+    if session_in_use(session_file):
+        raise HTTPException(
+            status_code=409,
+            detail=f"账号 {account_name} 正被常驻服务/任务占用，请先停止它们再手动回复",
+        )
+
+    adapter = await _open_telegram_adapter(account_name)
+    try:
+        sent = await adapter.send_message(
+            target_id=conv.target_user_id,
+            content=MessageContent(text=text, language="vi"),
+        )
+    finally:
+        await adapter.disconnect()
+
+    if not sent:
+        raise HTTPException(status_code=400, detail="发送失败（可能被养号限额拦截）")
+
+    db.add(
+        Message(
+            id=uuid.uuid4(),
+            conversation_id=conv.id,
+            direction=MessageDirection.OUTBOUND,
+            content=text,
+        )
+    )
+    conv.turn_count = (conv.turn_count or 0) + 1
+    await db.commit()
+    return {"status": "sent", "conversation_id": str(conv.id)}
 
 
 @router.post("/conversations/{conv_id}/end")

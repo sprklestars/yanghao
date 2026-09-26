@@ -17,6 +17,7 @@ dependencies = [
     # Telethon 走 proxy= 时需要有 SOCKS/HTTP 代理实现，缺失时报 No module named 'socks'。
     # Telethon 会优先使用 python-socks（异步），故显式声明，别依赖上游的隐式可选依赖。
     "python-socks[asyncio]>=2.4.4",
+    "openpyxl>=3.1.0",
     "httpx>=0.28.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",

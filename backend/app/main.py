@@ -1,4 +1,3 @@
-import hashlib
 import json
 import logging
 import re
@@ -12,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
+from app.api.export import router as export_router
 from app.api.routes import router as api_router
 from app.core.config import settings
 from app.core.database import async_session_factory
@@ -152,6 +152,8 @@ async def _extract_intelligence(session, conv, platform_enum, text: str) -> None
         calculate_activity_score,
         classify_category,
         extract_entities,
+        make_dedup_fingerprint,
+        merge_intelligence,
     )
 
     entities = extract_entities(text)
@@ -168,11 +170,7 @@ async def _extract_intelligence(session, conv, platform_enum, text: str) -> None
         )
         return
 
-    fingerprint = hashlib.sha256(
-        "|".join(
-            [conv.target_user_id, *entities.phones, *entities.emails, *entities.zalo_ids]
-        ).encode()
-    ).hexdigest()[:128]
+    fingerprint = make_dedup_fingerprint(platform_enum.value, conv.target_user_id, entities)
 
     existing = (
         await session.execute(
@@ -202,33 +200,29 @@ async def _extract_intelligence(session, conv, platform_enum, text: str) -> None
         has_complete_profile=bool(conv.target_display_name),
     )
 
+    incoming = IntelligenceRecord(
+        id=uuid.uuid4(),
+        task_id=conv.task_id,
+        platform=platform_enum,
+        target_user_id=conv.target_user_id,
+        display_name=conv.target_display_name,
+        category=category,
+        confidence=confidence,
+        signals=signals,
+        extracted_contacts=contacts,
+        business_info=business,
+        activity_status=activity,
+        last_seen=datetime.now(timezone.utc),
+        dedup_fingerprint=fingerprint,
+        platforms=[platform_enum.value],
+    )
+
     if existing is not None:
-        # 同一个目标再次出现：合并信号、抬高置信度，不重复建行
-        existing.confidence = max(existing.confidence or 0.0, confidence)
-        existing.signals = sorted(set((existing.signals or []) + signals))
-        existing.extracted_contacts = contacts
-        existing.business_info = business
-        existing.activity_status = activity
-        existing.last_seen = datetime.now(timezone.utc)
+        # 同一个人再次出现（含跨平台）：合并信号与联系方式，不重复建行
+        merge_intelligence(existing, incoming)
         logger.info("更新情报记录 %s（目标 %s）", existing.id, conv.target_user_id)
     else:
-        session.add(
-            IntelligenceRecord(
-                id=uuid.uuid4(),
-                task_id=conv.task_id,
-                platform=platform_enum,
-                target_user_id=conv.target_user_id,
-                display_name=conv.target_display_name,
-                category=category,
-                confidence=confidence,
-                signals=signals,
-                extracted_contacts=contacts,
-                business_info=business,
-                activity_status=activity,
-                last_seen=datetime.now(timezone.utc),
-                dedup_fingerprint=fingerprint,
-            )
-        )
+        session.add(incoming)
         logger.info(
             "新增情报记录：目标 %s / 分类 %s / 置信度 %.2f",
             conv.target_user_id,
@@ -340,6 +334,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 app.include_router(api_router, prefix="/api/v1")
+app.include_router(export_router, prefix="/api/v1")
 
 
 @app.websocket("/ws")

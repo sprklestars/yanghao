@@ -95,6 +95,7 @@ export interface Task {
       conversations?: number;
       finished_at?: string;
       error?: string | null;
+      warning?: string | null;
     };
     [key: string]: unknown;
   };
@@ -115,6 +116,7 @@ export interface Message {
 export interface Conversation {
   id: string;
   account_id: string;
+  account_name?: string | null;
   task_id?: string;
   target_user_id: string;
   target_display_name?: string | null;
@@ -140,6 +142,7 @@ export interface IntelligenceRecord {
   business_info?: Record<string, unknown>;
   activity_status: string;
   review_status: string;
+  platforms?: string[] | null;
   operator_notes?: string | null;
   last_seen?: string | null;
   collected_at: string;
@@ -255,6 +258,41 @@ export async function fetchAPI<T = any>(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * 下载导出文件：fetch → blob → 触发浏览器保存。
+ * 后端返回错误 JSON 时抛可读错误，避免浏览器跳到错误页。
+ */
+export async function downloadExport(path: string): Promise<void> {
+  const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+  const response = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      if (body?.detail) {
+        detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+      }
+    } catch {
+      /* 响应体不是 JSON */
+    }
+    throw new Error(detail);
+  }
+
+  const blob = await response.blob();
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename="?([^";]+)"?/);
+  const filename = match?.[1] || 'export.csv';
+
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
 }
 
 // ─────────────────────────────────────────────────────

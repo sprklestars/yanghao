@@ -146,6 +146,11 @@ class Conversation(Base):
     )
     turn_count: Mapped[int] = mapped_column(Integer, default=0)
     context_summary: Mapped[str | None] = mapped_column(Text)
+
+    @property
+    def account_name(self) -> str | None:
+        """账号显示名（sessions/ 下的会话名）。"""
+        return self.account.username if self.account else None
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -193,6 +198,7 @@ class IntelligenceRecord(Base):
     review_status: Mapped[ReviewStatus] = mapped_column(
         Enum(ReviewStatus), default=ReviewStatus.PENDING
     )
+    platforms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     operator_notes: Mapped[str | None] = mapped_column(Text)
     dedup_fingerprint: Mapped[str | None] = mapped_column(String(128), index=True)
     collected_at: Mapped[datetime] = mapped_column(

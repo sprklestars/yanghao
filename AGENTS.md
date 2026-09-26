@@ -231,6 +231,8 @@ IDLE → VERIFICATION → GREETING → PROBING → EXTRACTION → EXIT
 
 > `tasks/{id}/start` 只拦「正在运行」的任务（`PENDING` 是新建任务的默认状态、界面上叫"等待中"，不代表"已在运行"）；派发前先 ping Celery worker，**没有 worker 就在 API 进程内用 `run_task.apply()` 直接执行**并在响应里回 `mode: "inline"`，否则任务只会永远挂在"运行中"（本机通常只开 uvicorn + next，没有 worker）。
 
+导出：`GET /export/intelligence?format=csv|json|xlsx`、`GET /export/conversations?format=csv|json|xlsx`（`app/api/export.py`）。情报是"每条一行"、对话是"每条消息一行"（聊天日志）；CSV 用 `utf-8-sig` 带 BOM，Excel 用 openpyxl。前端情报页/对话页有导出按钮，走 `downloadExport()`（fetch → blob → 触发保存），错误会显示后端原因而不是跳到错误页。
+
 服务：`GET /services/status`、`POST /services/{platform}/start|stop`、`GET /services/{platform}/logs`（`platform ∈ {telegram, facebook}`，分别对应 `persistent_chat_demo.py` / `persistent_facebook_demo.py`，PID 文件 `chat_demo.pid` / `facebook_demo.pid`，日志在 `logs/`）
 
 > `start` 支持 `?session=<会话名>` 指定挂载哪个账号（前端会把该平台账号列表里的第一个传进来）：常驻进程一次只跑一个账号，`persistent_chat_demo.py` 通过 `TG_SESSION_NAME` 环境变量接收，默认 `printer`。目录里一个 `.session` 都没有时直接返回 400，而不是傻等一个并不存在的会话。
@@ -345,7 +347,7 @@ mypy .
 
 7. **旧文档中的路径与端口已过时**：大量 md 里出现 `D:\360MoveData\Users\张浩楠\Desktop\任务-杨`、`http://localhost:3001`、`<project-root>`，以及「数据库未启动 / 仅演示模式」之类的告警，都是写作当时的快照，不代表现状（前端默认 3000）。
 
-8. **`live-chat` 页面的演示开关不一致**：`frontend/src/app/live-chat/page.tsx` 里 `demoMode` 初始为 `true`，而仓库根的 `REAL_DEMO_GUIDE.md` 让人去改 `DEMO_MODE`；`frontend/LIVE_CHAT_DEMO.md` 描述的又是另一种状态。
+8. ~~**`live-chat` 页面是本地演示**~~ ✅ **已接成真数据**：现在左侧是 `/conversations` 拉来的真实会话列表（含 `account_name`），右侧显示该会话的真实历史消息，并通过 WebSocket 实时追加 `telegram_message`；底部输入框走新的 `POST /conversations/{id}/reply` 人工回复（以会话所属账号发出，账号被占用时返回 409）。`demoMode` / 随机假消息已不再存在。
 
 9. ~~**Celery 里同步/异步混用**~~ ✅ **已修复**：以前 `tasks.py` 每个适配器调用都 `asyncio.new_event_loop()`，而 Telethon 明确要求「连接期间不能换事件循环」，于是鉴权之后的 search/join/send 全部报 `The asyncio event loop must not change after connection`，任务却照样显示"完成"（加上适配器把 search 异常吞掉返回空列表，问题被完全隐藏）。现在整个外呼流程（鉴权 → 搜索 → 加群 → 取成员 → 发开场白）跑在同一个 `asyncio.run(_campaign())` 里，`_start_conversation` 也改成 async；`search_groups` 不再吞异常而是向上抛，任务会如实 FAILED；每次跑完把 `searched_keywords / found_groups / joined_groups / conversations` 写进 `task.config["last_run"]`，任务页直接显示"上次运行：搜了 N 个关键词 · 找到 M 个群 · 发起 K 个会话"，避免"完成了但什么都没干"看不出原因。
 
@@ -372,6 +374,10 @@ mypy .
 18. **任务用哪个账号：显式选，不要猜**：任务创建表单新增账号下拉（按所选平台从 `/accounts` 过滤），选中的值写进 `task.config["account"]`，`run_task` 用 `_telegram_session_candidates(account, preferred_name)` **优先用它**，没选才自动挑（逐个试鉴权，跳过空会话）。同时三平台的行为对齐：**只有 Telegram 有外呼流水线**，所以 Facebook/Zalo 任务在界面上标注"尚未接入、无法启动"，后端 `POST /tasks/{id}/start` 也直接返回 400 说明原因（不再静默置 PAUSED）。会话名也不再"手输随便填"：前端在填手机号时自动生成 `tg<手机号数字>`（可改），前后端共用同一套规则 `app/core/session_paths.is_valid_session_name()`（1-48 位小写字母/数字/下划线/短横线，且不能以符号开头）——既统一体验，也挡住了 `../evil` 这类会写到 `sessions/` 目录之外的路径穿越。
 
 19. **任务运行中的可观测性**：`run_task` 在每个检查点把进度写进 `task.config["progress"]`（`stage` / `keyword` / `group` / `target` / `members`），任务页在"运行中"时实时显示；跑完清空 `progress`、写 `last_run` 摘要。取消是异步的：`POST /tasks/{id}/cancel` 只立 `cancel_requested`，流水线在每个检查点读库、发现后抛 `TaskCancelledError`（**不重试**），把任务置 FAILED 并记 `error=用户取消`。暂停仅对未运行任务有效（置 PAUSED，再点"继续"即恢复）。
+
+20. **情报/对话导出**：`app/api/export.py` 提供 `/export/intelligence` 与 `/export/conversations`（`format=csv|json|xlsx`）。情报一条记录一行、对话一条消息一行；Excel 依赖 `openpyxl`（已加进 `pyproject.toml`）。前端情报页右上角三个按钮、对话页历史列表右上角一个下拉，都走 `api.ts` 的 `downloadExport()`（fetch → blob → 触发浏览器保存，失败显示后端原因）。
+
+21. **live-chat 真数据 + 多账号外呼**：① 会话模型加了 `account_name` 属性（`selectinload(Conversation.account)`），`/conversations` 响应带上它，live-chat 页据此做"会话 → 账号"的关联；新增 `POST /conversations/{id}/reply` 人工回复（会话文件不存在/被占用时给出 400/409 的明确提示）。② 任务支持多账号：`task.config["accounts"]` 是账号名数组（兼容单数 `account`），`run_task` 按它**串行**逐个账号跑完「搜群→加群→取目标→私聊」再断开换下一个，跳过多选里不存在或未登录的账号；`last_run.accounts` 记每个账号的分项统计，顶层数字是合计。前端任务表单从单选下拉改成**多选复选框**。
 
 ---
 

@@ -27,8 +27,10 @@ export default function TasksPage() {
     keywords: '',
     target_region: '',
   });
-  // 建任务时显式选账号（以前是后端自己挑，界面上只显示一句"将使用账号"）
-  const [taskAccount, setTaskAccount] = useState('');
+  // 建任务时显式选账号（可多选：多账号会串行各跑一轮）
+  const [taskAccounts, setTaskAccounts] = useState<string[]>([]);
+  // 目标获取策略：搜群数 / 每群扫描消息数 / 每群私聊人数
+  const [strategy, setStrategy] = useState({ search_limit: 5, member_scan: 20, dm_per_group: 5 });
 
   // Connect WebSocket on mount
   useEffect(() => {
@@ -48,11 +50,12 @@ export default function TasksPage() {
 
   const platformAccounts = accounts.filter((a) => a.platform === form.platform);
 
-  // 切换平台时，把账号选择重置为该平台下的第一个
+  // 切换平台时，把账号选择重置为该平台下的第一个（多选默认只勾第一个）
   useEffect(() => {
-    setTaskAccount((current) =>
-      platformAccounts.some((a) => a.id === current) ? current : platformAccounts[0]?.id || '',
-    );
+    setTaskAccounts((current) => {
+      const stillValid = current.filter((id) => platformAccounts.some((a) => a.id === id));
+      return stillValid.length ? stillValid : platformAccounts[0] ? [platformAccounts[0].id] : [];
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.platform, accounts]);
 
@@ -85,7 +88,14 @@ export default function TasksPage() {
         body: JSON.stringify({
           ...form,
           keywords: form.keywords.split(',').map((k) => k.trim()).filter(Boolean),
-          config: taskAccount ? { account: taskAccount } : {},
+          config: {
+            accounts: taskAccounts,
+            strategy: {
+              search_limit: Number(strategy.search_limit),
+              member_scan: Number(strategy.member_scan),
+              dm_per_group: Number(strategy.dm_per_group),
+            },
+          },
         }),
       });
       setForm({ name: '', platform: 'telegram', category: 'private_investigator', keywords: '', target_region: '' });
@@ -260,20 +270,51 @@ export default function TasksPage() {
           value={form.target_region}
           onChange={(e) => setForm({ ...form, target_region: e.target.value })}
         />
-        <select
-          className="w-full border px-3 py-2 rounded"
-          value={taskAccount}
-          onChange={(e) => setTaskAccount(e.target.value)}
-          disabled={platformAccounts.length === 0}
-        >
-          {platformAccounts.length === 0 && <option value="">（该平台暂无账号）</option>}
+        <div className="border border-slate-200 rounded px-3 py-2">
+          <div className="text-xs font-medium text-slate-500 mb-1.5">
+            使用账号（可多选，串行执行）{platformAccounts.length === 0 && ' —— 该平台暂无账号'}
+          </div>
           {platformAccounts.map((a) => (
-            <option key={a.id} value={a.id}>
-              使用账号：{a.display_name || a.username || a.id}
-              {a.paused ? '（已暂停）' : ''}
-            </option>
+            <label key={a.id} className="flex items-center gap-2 py-1 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={taskAccounts.includes(a.id)}
+                onChange={(e) =>
+                  setTaskAccounts((prev) =>
+                    e.target.checked
+                      ? [...prev, a.id]
+                      : prev.filter((id) => id !== a.id),
+                  )
+                }
+              />
+              <span>
+                {a.display_name || a.username || a.id}
+                {a.paused ? '（已暂停）' : ''}
+              </span>
+            </label>
           ))}
-        </select>
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          {[
+            { key: 'search_limit', label: '搜群数/关键词', min: 1, max: 20 },
+            { key: 'member_scan', label: '每群扫描消息数', min: 1, max: 200 },
+            { key: 'dm_per_group', label: '每群私聊人数', min: 0, max: 10 },
+          ].map((field) => (
+            <label key={field.key} className="block">
+              <span className="text-xs text-slate-500">{field.label}</span>
+              <input
+                type="number"
+                min={field.min}
+                max={field.max}
+                className="w-full border px-3 py-2 rounded"
+                value={strategy[field.key as keyof typeof strategy]}
+                onChange={(e) =>
+                  setStrategy((prev) => ({ ...prev, [field.key]: Number(e.target.value) }))
+                }
+              />
+            </label>
+          ))}
+        </div>
         {form.platform !== 'telegram' ? (
           <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 leading-relaxed">
             提示：Facebook / Zalo 的外呼流水线尚未接入，这类任务可以创建但<strong>无法启动</strong>
@@ -331,6 +372,9 @@ export default function TasksPage() {
                     {t.config.last_run.joined_groups ?? 0} 个 · 取到{' '}
                     {t.config.last_run.members_found ?? 0} 个目标 · 发起{' '}
                     {t.config.last_run.conversations ?? 0} 个会话
+                    {t.config.last_run.warning ? (
+                      <div className="text-amber-600 mt-0.5">⚠️ {t.config.last_run.warning}</div>
+                    ) : null}
                   </div>
                 ) : null}
               </td>

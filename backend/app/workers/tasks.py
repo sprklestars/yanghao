@@ -26,6 +26,8 @@ from app.services.intelligence.pipeline import (
     calculate_activity_score,
     classify_category,
     extract_entities,
+    make_dedup_fingerprint,
+    merge_intelligence,
 )
 from app.services.platform.base import AccountCredentials, MessageContent, PlatformName
 from app.services.platform.telegram_adapter import TelegramAdapter
@@ -95,6 +97,22 @@ def _telegram_session_candidates(
             return [preferred]
     return sorted(SESSION_DIR.glob("*.session"))
 
+
+def _requested_account_sessions(task: Task) -> list | None:
+    """任务显式指定的账号（多选 accounts，兼容单选 account）；没指定返回 None。"""
+    config = task.config or {}
+    requested = config.get("accounts") or ([config["account"]] if config.get("account") else [])
+    if not requested:
+        return None
+    sessions = []
+    for name in requested:
+        path = SESSION_DIR / f"{name}.session"
+        if path.exists():
+            sessions.append(path)
+        else:
+            logger.warning("任务指定的账号 %s 不存在（sessions/%s.session），跳过", name, name)
+    return sessions or None
+
 celery_app = Celery(
     "osint_worker",
     broker=settings.redis_url,
@@ -110,6 +128,81 @@ celery_app.conf.update(
     task_track_started=True,
     worker_max_tasks_per_child=1000,
 )
+
+
+async def _run_account_campaign(
+    db, task: Task, account: Account, adapter: TelegramAdapter, sub: dict
+) -> None:
+    """用单个账号跑一遍「搜群 → 加群 → 取目标 → 私聊」，统计写进 ``sub``。
+
+    不负责 disconnect（由调用方在一个账号结束后统一断开，好释放 .session）。
+    """
+    strategy = (task.config or {}).get("strategy") or {}
+    search_limit = int(strategy.get("search_limit", 5))
+    member_scan = int(strategy.get("member_scan", 20))
+    dm_per_group = int(strategy.get("dm_per_group", 5))
+
+    for keyword in task.keywords[:3]:  # Limit to first 3 keywords
+        if _cancel_requested(db, task.id):
+            raise TaskCancelledError()
+        _set_progress(db, task, stage="搜索群组", keyword=keyword, account=account.username)
+        logger.info("[%s] Searching for keyword: %s", account.username, keyword)
+        groups = await adapter.search_groups(query=keyword, limit=search_limit)
+        sub["searched_keywords"] += 1
+
+        for group in groups:
+            if _cancel_requested(db, task.id):
+                raise TaskCancelledError()
+            sub["found_groups"] += 1
+            _set_progress(
+                db,
+                task,
+                stage="加入群组",
+                keyword=keyword,
+                group=group.name,
+                account=account.username,
+            )
+
+            joined = await adapter.join_group(group.group_id)
+            if not joined:
+                continue
+            sub["joined_groups"] += 1
+
+            members = await adapter.get_group_members(group.group_id, limit=member_scan)
+            _set_progress(
+                db,
+                task,
+                stage="采集目标",
+                group=group.name,
+                members=len(members),
+                account=account.username,
+            )
+            sub["members_found"] += len(members)
+
+            for member in members[:dm_per_group]:
+                if _cancel_requested(db, task.id):
+                    raise TaskCancelledError()
+                target = f"@{member.username}" if member.username else member.user_id
+                _set_progress(
+                    db,
+                    task,
+                    stage="私聊目标",
+                    group=group.name,
+                    target=member.display_name,
+                    account=account.username,
+                )
+                conv_id = await _start_conversation(
+                    db=db,
+                    task=task,
+                    account=account,
+                    adapter=adapter,
+                    target_user_id=target,
+                    target_display_name=member.display_name,
+                )
+                if conv_id:
+                    sub["conversations"] += 1
+                else:
+                    sub["dm_failed"] += 1
 
 
 def _run_task_pipeline(task_id: str):
@@ -152,11 +245,11 @@ def _run_task_pipeline(task_id: str):
 
             # 3. Initialize platform adapter (sync version for Celery)
             if task.platform == Platform.TELEGRAM:
-                # 账号名对应 sessions/<username>.session 时优先用它；DB 里没账号
-                # 或者那个账号不可用时，挨个试 sessions/ 下的其它会话文件。
-                session_candidates = _telegram_session_candidates(
-                    account, (task.config or {}).get("account")
-                )
+                # 账号来源优先级：task.config["accounts"]（多选）> ["account"]（单选）
+                # > 自动挑一个真正登录过的。多账号会**串行**各跑一轮（Telegram 一账号一客户端）。
+                session_candidates = _requested_account_sessions(task)
+                if session_candidates is None:
+                    session_candidates = _telegram_session_candidates(account, None)
                 if not session_candidates:
                     logger.warning("sessions/ 下没有任何会话文件，任务无法执行")
                     task.status = TaskStatus.FAILED
@@ -170,7 +263,8 @@ def _run_task_pipeline(task_id: str):
                     "members_found": 0,
                     "dm_failed": 0,
                     "conversations": 0,
-                    "account": account.username if account else None,
+                    "account": None,
+                    "accounts": {},
                     "error": None,
                 }
 
@@ -178,133 +272,76 @@ def _run_task_pipeline(task_id: str):
                     """整个外呼流程跑在同一个事件循环里。
 
                     Telethon 明确要求连接期间不能更换事件循环；以前每次调用都
-                    `asyncio.new_event_loop()`，于是鉴权之后的 search/join/send
-                    全部报 "The asyncio event loop must not change after connection"，
-                    任务还照样显示"完成"。
+                    `asyncio.new_event_loop()`，导致鉴权之后的 search/join/send 全部报错。
+                    多账号在这里**串行**跑：一个账号结束并断开后，再轮到下一个。
                     """
                     nonlocal account
-                    adapter = None
-                    used_session = None
+                    used_names = []
                     for candidate_path in session_candidates:
-                        candidate = TelegramAdapter(
+                        if _cancel_requested(db, task.id):
+                            raise TaskCancelledError()
+
+                        adapter = TelegramAdapter(
                             api_id=settings.tg_api_id,
                             api_hash=settings.tg_api_hash,
                             session_name=str(candidate_path),
                             proxy=telegram_proxy(),
                         )
-                        if await candidate.authenticate(
+                        if not await adapter.authenticate(
                             AccountCredentials(
                                 platform=PlatformName.TELEGRAM,
                                 username=candidate_path.stem,
                                 credentials={},
                             )
                         ):
-                            adapter = candidate
-                            used_session = candidate_path
-                            break
-                        # 没登录成功的空会话（例如以前用演示账号名点过"加入"生成的），
-                        # 跳过它换下一个，别让它把任务带进"认证失败"
-                        await candidate.disconnect()
+                            logger.warning("账号 %s 未登录，跳过", candidate_path.stem)
+                            await adapter.disconnect()
+                            continue
 
-                    if adapter is None or used_session is None:
+                        acct = _get_or_create_account_for_session(db, candidate_path)
+                        if account is None:
+                            account = acct
+                        used_names.append(candidate_path.stem)
+
+                        sub = {
+                            "searched_keywords": 0,
+                            "found_groups": 0,
+                            "joined_groups": 0,
+                            "members_found": 0,
+                            "dm_failed": 0,
+                            "conversations": 0,
+                        }
+                        _set_progress(db, task, stage="已就绪", account=candidate_path.stem)
+                        logger.info("本次外呼使用账号: %s", candidate_path.name)
+                        try:
+                            await _run_account_campaign(db, task, acct, adapter, sub)
+                        finally:
+                            # 一个账号跑完就断开，释放 .session 给下一个账号
+                            await adapter.disconnect()
+
+                        for key in (
+                            "searched_keywords",
+                            "found_groups",
+                            "joined_groups",
+                            "members_found",
+                            "dm_failed",
+                            "conversations",
+                        ):
+                            summary[key] += sub[key]
+                        summary["accounts"][candidate_path.stem] = sub
+                        summary["account"] = ",".join(used_names)
+
+                    if not used_names:
                         raise RuntimeError(
                             "sessions/ 里没有可用的已登录账号（可能都是未登录的空会话文件），"
                             "请先在「账号管理」里添加并确认账号可用"
                         )
 
-                    if account is None or account.username != used_session.stem:
-                        account = _get_or_create_account_for_session(db, used_session)
-                    summary["account"] = account.username
-                    logger.info("本次外呼使用账号: %s", used_session.name)
-                    _set_progress(db, task, stage="已就绪", account=account.username)
-                    try:
-                        # 4. Search groups by keywords
-                        for keyword in task.keywords[:3]:  # Limit to first 3 keywords
-                            if _cancel_requested(db, task.id):
-                                raise TaskCancelledError()
-                            _set_progress(db, task, stage="搜索群组", keyword=keyword)
-                            logger.info("Searching for keyword: %s", keyword)
-                            groups = await adapter.search_groups(query=keyword, limit=5)
-                            summary["searched_keywords"] += 1
-
-                            for group in groups:
-                                if _cancel_requested(db, task.id):
-                                    raise TaskCancelledError()
-                                summary["found_groups"] += 1
-                                logger.info(
-                                    "Found group: %s (%s members)", group.name, group.member_count
-                                )
-                                _set_progress(
-                                    db, task, stage="加入群组", keyword=keyword, group=group.name
-                                )
-
-                                # 5. Join group
-                                joined = await adapter.join_group(group.group_id)
-                                if not joined:
-                                    continue
-                                summary["joined_groups"] += 1
-                                logger.info("Successfully joined group %s", group.group_id)
-
-                                # Get group members
-                                members = await adapter.get_group_members(group.group_id, limit=20)
-                                logger.info(
-                                    "Retrieved %d members from group %s",
-                                    len(members),
-                                    group.group_id,
-                                )
-                                _set_progress(
-                                    db,
-                                    task,
-                                    stage="采集目标",
-                                    group=group.name,
-                                    members=len(members),
-                                )
-                                summary["members_found"] += len(members)
-
-                                # 6. Start conversations with selected members
-                                for member in members[:5]:  # Limit to 5 members per group
-                                    if _cancel_requested(db, task.id):
-                                        raise TaskCancelledError()
-                                    # 有用户名就用 @username 私聊（数字 id 需要实体缓存，
-                                    # 拉不到成员列表时并不可靠）
-                                    target = (
-                                        f"@{member.username}"
-                                        if member.username
-                                        else member.user_id
-                                    )
-                                    _set_progress(
-                                        db,
-                                        task,
-                                        stage="私聊目标",
-                                        group=group.name,
-                                        target=member.display_name,
-                                    )
-                                    conv_id = await _start_conversation(
-                                        db=db,
-                                        task=task,
-                                        account=account,
-                                        adapter=adapter,
-                                        target_user_id=target,
-                                        target_display_name=member.display_name,
-                                    )
-                                    if conv_id:
-                                        summary["conversations"] += 1
-                                        logger.info(
-                                            "Started conversation %s with %s",
-                                            conv_id,
-                                            member.display_name,
-                                        )
-                                    else:
-                                        summary["dm_failed"] += 1
-                    finally:
-                        # 一定要断开：否则 SQLite 会话文件被本进程一直占着，
-                        # 之后再跑任务/常驻服务会报 "database is locked"。
-                        await adapter.disconnect()
-
                 try:
                     asyncio.run(_campaign())
                 except TaskCancelledError:
                     summary["error"] = "用户取消"
+                    summary["warning"] = None
                     task.status = TaskStatus.FAILED
                     task.config = {
                         **(task.config or {}),
@@ -316,6 +353,13 @@ def _run_task_pipeline(task_id: str):
                     }
                     db.commit()
                     return
+
+                if summary["found_groups"] == 0:
+                    summary["warning"] = "未搜到任何群"
+                elif summary["members_found"] == 0:
+                    summary["warning"] = "未获取到任何可私聊目标"
+                else:
+                    summary["warning"] = None
 
                 # 把这次跑的结果记进 task.config，前端能看到"跑完到底做了几件事"
                 task.config = {
@@ -605,10 +649,14 @@ def _process_intelligence_sync(db, conv: Conversation, text: str):
             "bank_accounts": entities.bank_accounts,
         }
 
-        # Create intelligence record
-        intel_id = uuid.uuid4()
-        intel = IntelligenceRecord(
-            id=intel_id,
+        platform_value = conv.task.platform.value
+        fingerprint = make_dedup_fingerprint(platform_value, conv.target_user_id, entities)
+        existing = db.execute(
+            select(IntelligenceRecord).where(IntelligenceRecord.dedup_fingerprint == fingerprint)
+        ).scalar_one_or_none()
+
+        incoming = IntelligenceRecord(
+            id=uuid.uuid4(),
             task_id=conv.task_id,
             platform=conv.task.platform,
             target_user_id=conv.target_user_id,
@@ -620,26 +668,19 @@ def _process_intelligence_sync(db, conv: Conversation, text: str):
             business_info=business_info,
             activity_status=activity_status,
             last_seen=datetime.now(timezone.utc),
-            dedup_fingerprint=_generate_fingerprint(conv.target_user_id, entities),
+            dedup_fingerprint=fingerprint,
+            platforms=[platform_value],
         )
-        db.add(intel)
-        db.commit()
 
-        logger.info("Created intelligence record %s (confidence: %.2f)", intel_id, confidence)
+        if existing is not None:
+            merge_intelligence(existing, incoming)
+            logger.info("合并情报记录 %s", existing.id)
+        else:
+            db.add(incoming)
+            logger.info(
+                "Created intelligence record %s (confidence: %.2f)", incoming.id, confidence
+            )
+        db.commit()
 
     except Exception as e:
         logger.error("Failed to process intelligence: %s", e, exc_info=True)
-
-
-def _generate_fingerprint(target_user_id: str, entities) -> str:
-    """Generate deduplication fingerprint."""
-    import hashlib
-
-    # Combine user ID with extracted contact info
-    fingerprint_parts = [target_user_id]
-    fingerprint_parts.extend(entities.phones)
-    fingerprint_parts.extend(entities.emails)
-    fingerprint_parts.extend(entities.zalo_ids)
-
-    raw = "|".join(fingerprint_parts)
-    return hashlib.sha256(raw.encode()).hexdigest()
