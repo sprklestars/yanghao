@@ -11,6 +11,8 @@ from typing import Optional
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
+from app.core.browser_launch import launch_browser
+from app.core.config import settings
 from app.services.platform.base import (
     AccountCredentials,
     AccountHealthStatus,
@@ -65,15 +67,20 @@ class FacebookAdapter(PlatformAdapter):
     async def authenticate(self, credentials: AccountCredentials) -> bool:
         """Authenticate by loading saved session or performing login."""
         try:
-            from playwright_stealth import stealth_async
+            from playwright_stealth import Stealth
 
             self._playwright = await async_playwright().start()
 
-            proxy_url = credentials.credentials.get("proxy", "http://127.0.0.1:7890")
+            # 代理默认取 .env 的 TG_PROXY_URL：以前这里写死 http://127.0.0.1:7890，
+            # 而实际配置是 socks5，走错了协议就连不上 FB。
+            proxy_url = credentials.credentials.get("proxy") or settings.tg_proxy_url
 
-            self._browser = await self._playwright.chromium.launch(
+            # 走统一的浏览器探测：自带 Chromium 在这台机器上有头起不来（Windows SxS），
+            # 无头一般没问题，但坏掉时能自动退到 Edge/Chrome，不至于整个任务失败。
+            self._browser, _channel = await launch_browser(
+                self._playwright,
                 headless=True,
-                proxy={"server": proxy_url},
+                proxy={"server": proxy_url} if proxy_url else None,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--disable-infobars",
@@ -82,6 +89,7 @@ class FacebookAdapter(PlatformAdapter):
                     "--disable-dev-shm-usage",
                     "--no-sandbox",
                 ],
+                log=logger.info,
             )
 
             self._context = await self._browser.new_context(
@@ -108,7 +116,7 @@ class FacebookAdapter(PlatformAdapter):
             )
 
             self._page = await self._context.new_page()
-            await stealth_async(self._page)
+            await Stealth().apply_stealth_async(self._page)
 
             # Try to load saved session
             cookie_file = f"sessions/{self._session_name}_cookies.json"

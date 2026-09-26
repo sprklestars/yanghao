@@ -55,6 +55,8 @@ export default function AccountsPage() {
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginSuccess, setLoginSuccess] = useState('');
+  const [fbCookieText, setFbCookieText] = useState('');
+  const [fbCookieLoading, setFbCookieLoading] = useState(false);
   const [testConnLoading, setTestConnLoading] = useState(false);
   const [testConnResult, setTestConnResult] = useState<{ ok: boolean; message: string } | null>(null);
 
@@ -261,6 +263,7 @@ export default function AccountsPage() {
     setLoginSessionName('');
     setLoginError('');
     setLoginSuccess('');
+    setFbCookieText('');
     setTestConnResult(null);
     setShowLoginModal(true);
   };
@@ -756,8 +759,13 @@ export default function AccountsPage() {
                     try {
                       const result = await accountAPI.facebookLoginComplete(name);
                       if (result.status === 'success') {
-                        setLoginSuccess(`Facebook 登录成功: ${name}`);
-                        setTimeout(() => { setShowLoginModal(false); loadData(); }, 1500);
+                        if (result.warning) {
+                          // 后端没看到登录态：别报"登录成功"，让用户自己确认
+                          setLoginSuccess(`已保存会话，但${result.warning}`);
+                        } else {
+                          setLoginSuccess(`Facebook 登录成功: ${name}`);
+                          setTimeout(() => { setShowLoginModal(false); loadData(); }, 1500);
+                        }
                       } else {
                         setLoginError(result.message || '登录完成失败');
                       }
@@ -767,6 +775,54 @@ export default function AccountsPage() {
                     {loginLoading ? '保存中...' : '✅ 完成登录'}
                   </button>
                 </div>
+
+                {/* cookie 直接导入：浏览器登录被 FB 风控卡住时的可靠路径 */}
+                <details className="border border-slate-200 rounded-lg overflow-hidden">
+                  <summary className="px-3 py-2.5 bg-slate-50 text-sm font-medium text-slate-700 cursor-pointer select-none">
+                    🔑 已有 Cookie？直接粘贴导入（推荐）
+                  </summary>
+                  <div className="p-3 space-y-3">
+                    <div className="text-xs text-slate-500 space-y-1">
+                      <p>支持三种格式，任选一种粘进下面的框：</p>
+                      <ul className="list-disc list-inside space-y-0.5">
+                        <li><code className="text-slate-700">c_user=100...; xs=12%3A...; datr=...</code>（DevTools → Network → 任意 facebook.com 请求 → Request Headers 里的 cookie 整行）</li>
+                        <li>JSON（浏览器扩展导出的 cookie 数组）</li>
+                        <li>cookies.txt（Netscape 格式，扩展「Get cookies.txt」导出）</li>
+                      </ul>
+                      <p className="text-amber-700">
+                        注意：<code>xs</code> 是 HttpOnly，控制台里 <code>document.cookie</code> 拿不到它，
+                        必须用扩展导出或从请求头复制，否则导入后会被判为未登录。
+                      </p>
+                    </div>
+                    <textarea
+                      value={fbCookieText}
+                      onChange={(e) => setFbCookieText(e.target.value)}
+                      rows={5}
+                      placeholder={'粘贴 cookie 到这里，例如：\nc_user=100012345678900; xs=12%3Aabcdef...; datr=xyz...'}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-slate-900 focus:border-transparent outline-none text-xs font-mono"
+                    />
+                    <button
+                      onClick={async () => {
+                        const name = loginSessionName || 'fb_default';
+                        if (!fbCookieText.trim()) { setLoginError('请先粘贴 cookie 内容'); return; }
+                        setFbCookieLoading(true); setLoginError(''); setLoginSuccess('');
+                        try {
+                          const result = await accountAPI.facebookImportCookies(name, fbCookieText);
+                          setLoginSuccess(result.message || `已导入 cookie: ${name}`);
+                          setFbCookieText('');
+                          setTimeout(() => { setShowLoginModal(false); loadData(); }, 1500);
+                        } catch (e: any) {
+                          setLoginError(e?.message || '导入 cookie 失败');
+                        }
+                        setFbCookieLoading(false);
+                      }}
+                      disabled={fbCookieLoading}
+                      className="w-full px-4 py-2.5 bg-slate-900 text-white rounded-lg hover:bg-slate-800 text-sm font-medium disabled:opacity-50 transition-colors"
+                    >
+                      {fbCookieLoading ? '导入并校验中...' : '导入并校验登录态'}
+                    </button>
+                  </div>
+                </details>
               </div>
             )}
 

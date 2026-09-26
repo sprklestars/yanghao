@@ -530,7 +530,7 @@ export const accountAPI = {
     }),
 
   facebookLoginComplete: (sessionName: string) =>
-    fetchAPI<{ status: string; message: string }>(
+    fetchAPI<{ status: string; message: string; warning?: string }>(
       '/accounts/facebook/login-complete',
       {
         method: 'POST',
@@ -538,6 +538,24 @@ export const accountAPI = {
         timeout: 30000,
       },
     ),
+
+  /**
+   * 直接粘贴 cookie 导入 Facebook 账号（绕开被风控的浏览器登录）。
+   * 支持 `c_user=...; xs=...` 请求头字符串、JSON 数组、Netscape cookies.txt。
+   */
+  facebookImportCookies: (sessionName: string, cookies: string, verify = true) =>
+    fetchAPI<{
+      status: string;
+      message: string;
+      count?: number;
+      verified?: boolean | null;
+      user_id?: string | null;
+      warning?: string;
+    }>('/accounts/facebook/import-cookies', {
+      method: 'POST',
+      body: JSON.stringify({ session_name: sessionName, cookies, verify }),
+      timeout: 120000, // 带校验时要开无头浏览器，给足时间
+    }),
 
   zaloLogin: (phone: string, password: string, sessionName: string) =>
     fetchAPI('/accounts/zalo/login', {

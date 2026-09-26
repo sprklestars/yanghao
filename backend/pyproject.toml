@@ -36,6 +36,9 @@ dev = [
 ]
 facebook = [
     "playwright>=1.49.0",
+    # 反检测脚本注入。用 2.x：1.x 依赖已被废弃的 pkg_resources，而 uv 建的
+    # venv 不带 setuptools，装上会 ImportError。
+    "playwright-stealth>=2.0.0",
 ]
 zalo = [
     "zlapi>=1.0.0",

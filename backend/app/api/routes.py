@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -644,20 +645,47 @@ async def facebook_login_start(body: dict):
                 "session_name": session_name,
             }
 
-    script_path = str(Path(__file__).resolve().parent.parent.parent / "quick_login_facebook.py")
-    venv_python = str(Path(__file__).resolve().parent.parent.parent / "venv" / "bin" / "python3")
+    script_path = BACKEND_DIR / "quick_login_facebook.py"
+    if not script_path.exists():
+        raise HTTPException(500, f"登录脚本不存在: {script_path.name}")
+
+    # 用当前解释器（就是跑 API 的这个 venv python）。以前这里硬编码了
+    # venv/bin/python3 这种 Linux 路径，Windows 上直接 WinError 2 找不到文件。
+    python_executable = sys.executable
+
+    # 子进程输出写到日志文件：PIPE 不读会把它憋死，出错时也没法排查
+    login_log = BACKEND_DIR / "logs" / "facebook_login.log"
+    login_log.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        proc = subprocess.Popen(
-            [venv_python, script_path, session_name],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        with open(login_log, "a", encoding="utf-8") as log_file:
+            proc = subprocess.Popen(
+                [python_executable, str(script_path), session_name],
+                cwd=str(BACKEND_DIR),
+                stdin=subprocess.PIPE,
+                stdout=log_file,
+                stderr=log_file,
+                env={**os.environ, "PYTHONUTF8": "1"},
+            )
         _fb_login_processes[session_name] = proc
         logger.info(
             "Facebook login browser launched for session: %s (PID: %d)", session_name, proc.pid
         )
+
+        # 浏览器启动失败（没装 playwright、缺 Chromium 等）会很快退出，
+        # 这里等一下把日志尾部带回去，前端才看得到真正原因
+        await asyncio.sleep(3)
+        if proc.poll() is not None:
+            _fb_login_processes.pop(session_name, None)
+            tail = _meaningful_tail(login_log, 12)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"浏览器没能打开（登录进程已退出，exit code {proc.returncode}）。"
+                    f"最近日志：\n{tail}"
+                ),
+            )
+
         return {
             "status": "browser_opened",
             "message": (
@@ -665,6 +693,8 @@ async def facebook_login_start(body: dict):
             ),
             "session_name": session_name,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to launch FB login browser: %s", e)
         raise HTTPException(400, f"启动浏览器失败: {e}")
@@ -678,6 +708,7 @@ async def facebook_login_complete(body: dict):
     )
 
     proc = _fb_login_processes.get(session_name)
+    login_detected: bool | None = None
     if proc and proc.poll() is None:
         # Send Enter to the subprocess so it saves cookies and exits
         try:
@@ -686,6 +717,10 @@ async def facebook_login_complete(body: dict):
             proc.wait(timeout=15)
         except Exception:
             proc.kill()
+        # 登录脚本退出码 0 = 页面上看到了登录态，1 = 没检测到。
+        # 以前这里不看退出码，哪怕用户根本没登录也回"登录成功"，
+        # 结果是账号列表里多出一个用不了的账号。
+        login_detected = proc.returncode == 0
         del _fb_login_processes[session_name]
 
     cookie_file = SESSION_DIR / f"{session_name}_cookies.json"
@@ -694,17 +729,93 @@ async def facebook_login_complete(body: dict):
 
         with open(cookie_file) as f:
             cookies = json.load(f)
-        return {
+        payload = {
             "status": "success",
-            "message": f"登录成功，已保存 {len(cookies)} 个 cookies",
+            "message": f"已保存 {len(cookies)} 个 cookies",
             "session_name": session_name,
         }
+        if login_detected is False:
+            payload["warning"] = (
+                "没有在页面里检测到 Facebook 登录态，这个账号大概率还没登录成功："
+                "请重新点「打开浏览器」登录后再点「完成登录」。"
+            )
+        return payload
     else:
         return {
             "status": "failed",
             "message": "未找到 cookie 文件，请确认已在浏览器中完成登录",
             "session_name": session_name,
         }
+
+
+@router.post("/accounts/facebook/import-cookies")
+async def facebook_import_cookies(body: dict):
+    """直接粘贴 cookie 导入 Facebook 账号（绕开被风控的浏览器登录）。
+
+    支持请求头那串 `c_user=...; xs=...`、JSON（扩展/Playwright 导出）、
+    Netscape cookies.txt。默认顺带用无头浏览器校验一次登录态。
+    """
+    import json
+
+    from app.core import cookie_import
+    from app.core.config import settings
+
+    session_name = _require_valid_session_name(
+        (body.get("session_name") or "fb_default").strip() or "fb_default"
+    )
+    try:
+        cookies = cookie_import.parse_cookie_input(body.get("cookies"))
+    except ValueError as exc:
+        raise HTTPException(400, f"cookie 解析失败：{exc}") from exc
+
+    missing = cookie_import.missing_login_cookies(cookies)
+    if missing:
+        raise HTTPException(
+            400,
+            "这串 cookie 里缺少 Facebook 登录必需的 "
+            + "、".join(missing)
+            + "。注意 `xs` 是 HttpOnly，用 document.cookie 拿不到，"
+            "请用浏览器扩展导出，或从 DevTools → Network → 任意 facebook.com 请求的 "
+            "Request Headers 里复制整行 cookie。",
+        )
+
+    ensure_session_dir()
+    cookie_file = SESSION_DIR / f"{session_name}_cookies.json"
+    cookie_file.write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    payload = {
+        "status": "success",
+        "session_name": session_name,
+        "count": len(cookies),
+        "message": f"已导入 {len(cookies)} 个 cookie，账号 {session_name} 已加入账号列表",
+        "verified": None,
+    }
+    if body.get("verify", True) is False:
+        return payload
+
+    result = await cookie_import.verify_facebook_cookies(cookies, proxy_url=settings.tg_proxy_url)
+    payload["verified"] = result["verified"]
+    payload["user_id"] = result["user_id"]
+    if result["verified"] is False:
+        # 校验明确说没登录：别留一个用不了的账号在列表里
+        cookie_file.unlink(missing_ok=True)
+        raise HTTPException(
+            400,
+            f"cookie 导进来了，但校验发现没有登录态（{result['reason']}）。"
+            "请确认导出的是已登录 Facebook 的 cookie（要含 c_user 和 xs），"
+            "然后重新试一次。",
+        )
+    if result["verified"] is True:
+        payload["message"] = (
+            f"已导入 {len(cookies)} 个 cookie 并校验通过"
+            + (f"（Facebook 用户 ID：{result['user_id']}）" if result["user_id"] else "")
+        )
+    else:
+        payload["message"] = (
+            f"已导入 {len(cookies)} 个 cookie，但这次没能校验（{result['reason']}）"
+            "，可以点账号列表里的「检测」再确认一次"
+        )
+    return payload
 
 
 @router.post("/accounts/zalo/login")
@@ -1591,6 +1702,57 @@ def _tail_lines(path: Path, count: int) -> list[str]:
     return lines[-count:]
 
 
+# Python 3.14 的解释器在关掉子进程管道时，asyncio 的析构函数会往 stderr 刷一屏
+# "unclosed transport / I/O operation on closed pipe" 的 ResourceWarning 噪音。
+# 它跟真正的失败原因毫无关系，却总是排在日志最后几行，直接把真实报错顶掉了
+# （用户看到的就是这个噪音，所以以为"报的还是同样的错"）。
+_LOG_NOISE_MARKERS = (
+    "ResourceWarning",
+    "unclosed transport",
+    "I/O operation on closed pipe",
+    "Exception ignored while calling deallocator",
+    "proactor_events.py",
+    "windows_utils.py",
+    "base_subprocess.py",
+    "info.append(",
+    "_warn(",
+)
+_LOG_NOISE_START_RE = re.compile(r"^(Traceback \(most recent call last\):|Exception ignored)")
+
+
+def _is_log_noise_start(line: str) -> bool:
+    text = line.strip()
+    if not text:
+        return False
+    if any(marker in text for marker in _LOG_NOISE_MARKERS):
+        return True
+    return bool(_LOG_NOISE_START_RE.match(text))
+
+
+def _meaningful_tail(path: Path, count: int = 12) -> str:
+    """日志尾部，但剔掉 asyncio 关管道的噪音，只留能说明问题的行。"""
+    raw = _tail_lines(path, 300)
+    kept: list[str] = []
+    skipping = False
+    for line in raw:
+        text = line.strip()
+        if not text:
+            skipping = False  # 噪音块以空行结束
+            continue
+        if skipping:
+            continue
+        if _is_log_noise_start(line):
+            skipping = True
+            continue
+        kept.append(line.rstrip())
+    if not kept:
+        # 全是噪音时宁可原样给出尾部，也别让用户什么都看不到
+        kept = [line.rstrip() for line in raw if line.strip()]
+    if not kept:
+        return "（日志为空）"
+    return "\n".join(kept[-count:])
+
+
 def _first_session_name() -> str | None:
     """sessions/ 目录里的第一个会话名（账号列表的 id）。"""
     files = sorted(SESSION_DIR.glob("*.session"))
@@ -1741,7 +1903,7 @@ async def start_service(
     if proc.poll() is not None:
         # 子进程启动即退出（依赖缺失、凭证/代理没配好等）。以前这里照样回
         # "started"，前端看不出问题，只表现为「按钮没反应」。
-        tail = "\n".join(_tail_lines(log_file, 15))
+        tail = _meaningful_tail(log_file, 15)
         raise HTTPException(
             status_code=500,
             detail=(
