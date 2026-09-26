@@ -98,7 +98,7 @@ async def login_facebook(session_name: str) -> bool:
         # Load existing cookies if available
         if cookie_file.exists():
             try:
-                with open(cookie_file, "r") as f:
+                with open(cookie_file, "r", encoding="utf-8") as f:
                     cookies = json.load(f)
                 await context.add_cookies(cookies)
                 print(f"📂 Loaded existing cookies from {cookie_file.name}")

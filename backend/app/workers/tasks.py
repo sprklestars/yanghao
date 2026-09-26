@@ -269,6 +269,25 @@ async def _run_account_campaign(
             f"搜索群组({keyword})",
         )
         sub["searched_keywords"] += 1
+        # 被平台安全验证拦下时别含糊成"没搜到群"：把真实原因记下来给前端看
+        block_reason = getattr(adapter, "block_reason", None)
+        if block_reason:
+            sub["block_reason"] = block_reason
+            # 同时落到账号状态上：账号卡片会变成"需人工"并显示原因
+            try:
+                from app.core import account_status
+
+                account_status.record_platform_block(account.username, block_reason)
+            except Exception:  # 状态写失败不能影响任务本身
+                logger.warning("记录账号拦截状态失败：%s", account.username, exc_info=True)
+        elif groups:
+            # 这一轮真的搜到东西了：清掉之前的拦截/失效标记
+            try:
+                from app.core import account_status
+
+                account_status.record_task_success(account.username)
+            except Exception:
+                logger.warning("恢复账号健康状态失败：%s", account.username, exc_info=True)
 
         for group in groups:
             if _cancel_requested(db, task.id):
@@ -521,11 +540,24 @@ def _run_task_pipeline(task_id: str):
                 db.commit()
                 return
 
+            platform_block_reason = next(
+                (
+                    sub.get("block_reason")
+                    for sub in (summary["accounts"] or {}).values()
+                    if isinstance(sub, dict) and sub.get("block_reason")
+                ),
+                None,
+            )
+
             if any(
                 isinstance(sub, dict) and sub.get("timeout")
                 for sub in (summary["accounts"] or {}).values()
             ):
                 summary["warning"] = "有账号调用超时被跳过（网络/连接不稳定），本轮产出不完整"
+            elif platform_block_reason:
+                # 被安全验证拦下：这是账号侧的问题，跟关键词无关，必须如实说
+                summary["warning"] = platform_block_reason
+                summary["blocked_by_platform"] = True
             elif summary["found_groups"] == 0:
                 summary["warning"] = "未搜到任何群"
             elif summary["members_found"] == 0:
@@ -661,17 +693,17 @@ async def _start_conversation(
 
         # Send initial greeting
         engine = ConversationEngine()
+        # 人设来源：DB 关联优先；没有就按 sessions/<账号>_meta.json 里选的 key
+        # 去人设注册表取（这样"账号管理里选的人设"才真的会生效）。
+        from app.services.conversation.personas import (
+            persona_key_for_account,
+            resolve_persona_config,
+        )
+
         persona_config = (
             account.persona.persona_config
             if account.persona
-            else {
-                "name": "User",
-                "age": 28,
-                "occupation": "freelancer",
-                "location": "Ho Chi Minh City",
-                "backstory": "Freelance designer looking for opportunities",
-                "tone": "casual, friendly",
-            }
+            else resolve_persona_config(persona_key_for_account(account.username))
         )
 
         # Generate greeting message（和 send_message 共用同一个事件循环）
@@ -763,7 +795,16 @@ def process_incoming_message(message_data: dict):
         # Load account and persona
         result = db.execute(select(Account).where(Account.id == conv.account_id))
         account = result.scalar_one()
-        persona_config = account.persona.persona_config if account.persona else {}
+        from app.services.conversation.personas import (
+            persona_key_for_account,
+            resolve_persona_config,
+        )
+
+        persona_config = (
+            account.persona.persona_config
+            if account.persona
+            else resolve_persona_config(persona_key_for_account(account.username))
+        )
 
         # Generate response using conversation engine
         engine = ConversationEngine()

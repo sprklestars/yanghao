@@ -44,6 +44,10 @@ export interface Account {
   username: string;
   display_name?: string;
   health: AccountHealth;
+  /** 为什么不是健康状态（后端给的直接原因，例如"Facebook 要求安全验证"） */
+  health_reason?: string;
+  health_reason_kind?: string;
+  health_updated_at?: string;
   reply_policy?: ReplyPolicy;
   paused?: boolean;
   persona?: string;
@@ -60,6 +64,13 @@ export interface PersonaPreset {
   name: string;
   desc: string;
   tone?: string;
+  style?: string;
+  age?: number;
+  occupation?: string;
+  location?: string;
+  backstory?: string;
+  /** false = 用户自定义（可删除）；内置预设为 true */
+  builtin?: boolean;
 }
 
 export interface ServiceStatus {
@@ -487,6 +498,28 @@ export const accountAPI = {
 
   listPersonas: () =>
     fetchAPI<{ personas: PersonaPreset[] }>('/accounts/personas'),
+
+  /** 新建一个人设（人设里选过的会自动写进 sessions/personas.json） */
+  createPersona: (persona: {
+    name: string;
+    desc?: string;
+    tone?: string;
+    age?: number;
+    occupation?: string;
+    location?: string;
+    backstory?: string;
+  }) =>
+    fetchAPI<{ status: string; persona: PersonaPreset }>('/accounts/personas', {
+      method: 'POST',
+      body: JSON.stringify(persona),
+      timeout: 20000,
+    }),
+
+  deletePersona: (personaKey: string) =>
+    fetchAPI<{ status: string; key: string }>(
+      `/accounts/personas/${encodeURIComponent(personaKey)}`,
+      { method: 'DELETE', timeout: 20000 },
+    ),
 
   checkSession: (accountId: string) =>
     fetchAPI<SessionCheckResult>(`/accounts/${accountId}/check-session`, {

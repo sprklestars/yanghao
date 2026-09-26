@@ -85,11 +85,34 @@ async def list_accounts():
         meta_file = SESSION_DIR / f"{name}_meta.json"
         if meta_file.exists():
             try:
-                with open(meta_file) as f:
+                # 必须显式 utf-8：Windows 下默认是 GBK，而 meta 里会有中文
+                # （例如 health_reason"Facebook 要求安全验证"），解码失败会被
+                # 下面的 except 吞掉，账号就"看起来一切正常"。
+                with open(meta_file, encoding="utf-8") as f:
                     return json.load(f)
-            except Exception:
+            except (OSError, ValueError):
                 pass
         return {}
+
+    # 三个平台共用同一份 meta（sessions/<name>_meta.json）：
+    # 以前只有 Telegram 分支读了 reply_policy / paused / persona，
+    # Facebook/Zalo 分支漏了 → 前端 toggle 写进去了，列表却读不回来，
+    # 表现就是"Facebook 账号的回复策略设置不了"。
+    default_policy = {"private": True, "groups": False, "channels": False, "bots": False}
+
+    def meta_fields(meta: dict) -> dict:
+        return {
+            "display_name": meta.get("display_name", ""),
+            "health": meta.get("health", "green"),
+            "reply_policy": meta.get("reply_policy", dict(default_policy)),
+            "paused": meta.get("paused", False),
+            "persona": meta.get("persona", ""),
+            "proxy_url": meta.get("proxy_url", "http://127.0.0.1:7890"),
+            # 为什么不是绿色：直接给用户看的可读原因（被安全验证、登录失效…）
+            "health_reason": meta.get("health_reason", ""),
+            "health_reason_kind": meta.get("health_reason_kind", ""),
+            "health_updated_at": meta.get("health_updated_at", ""),
+        }
 
     # Telegram sessions
     for session_file in sorted(SESSION_DIR.glob("*.session")):
@@ -101,15 +124,7 @@ async def list_accounts():
                 "id": name,
                 "platform": "telegram",
                 "username": f"@{name}",
-                "display_name": meta.get("display_name", ""),
-                "health": meta.get("health", "green"),
-                "reply_policy": meta.get(
-                    "reply_policy",
-                    {"private": True, "groups": False, "channels": False, "bots": False},
-                ),
-                "paused": meta.get("paused", False),
-                "persona": meta.get("persona", ""),
-                "proxy_url": "http://127.0.0.1:7890",
+                **meta_fields(meta),
                 "is_active": True,
                 "last_action_at": stat.st_mtime,
                 "created_at": stat.st_ctime,
@@ -127,8 +142,7 @@ async def list_accounts():
                 "id": name,
                 "platform": "facebook",
                 "username": name,
-                "display_name": meta.get("display_name", ""),
-                "health": meta.get("health", "green"),
+                **meta_fields(meta),
                 "is_active": True,
                 "last_action_at": stat.st_mtime,
                 "created_at": stat.st_ctime,
@@ -146,8 +160,7 @@ async def list_accounts():
                 "id": name,
                 "platform": "zalo",
                 "username": name,
-                "display_name": meta.get("display_name", ""),
-                "health": meta.get("health", "green"),
+                **meta_fields(meta),
                 "is_active": True,
                 "last_action_at": stat.st_mtime,
                 "created_at": stat.st_ctime,
@@ -203,7 +216,7 @@ async def update_account(account_id: str, body: dict):
     meta_file = SESSION_DIR / f"{account_id}_meta.json"
     meta = {}
     if meta_file.exists():
-        with open(meta_file) as f:
+        with open(meta_file, encoding="utf-8") as f:
             meta = json.load(f)
     if "display_name" in body:
         meta["display_name"] = body["display_name"]
@@ -215,48 +228,44 @@ async def update_account(account_id: str, body: dict):
         meta["paused"] = body["paused"]
     if "persona" in body:
         meta["persona"] = body["persona"]
-    with open(meta_file, "w") as f:
-        json.dump(meta, f)
+    with open(meta_file, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False)
     return {"status": "updated", "account_id": account_id, "meta": meta}
 
 
 @router.get("/accounts/personas")
 async def list_personas():
-    """List available persona presets."""
-    return {
-        "personas": [
-            {
-                "key": "designer",
-                "name": "Nguyen Van A",
-                "desc": "自由设计师，28岁，胡志明市",
-                "tone": "随和友好",
-            },
-            {
-                "key": "trader",
-                "name": "Tran Minh Duc",
-                "desc": "加密货币交易员，32岁，河内",
-                "tone": "自信专业",
-            },
-            {
-                "key": "student",
-                "name": "Le Thi Mai",
-                "desc": "大学生，22岁，岘港",
-                "tone": "好奇礼貌",
-            },
-            {
-                "key": "business",
-                "name": "Pham Hoang Nam",
-                "desc": "进出口贸易老板，35岁，胡志明市",
-                "tone": "稳重可信",
-            },
-        ]
-    }
+    """List persona presets：内置 + 用户自定义（存 sessions/personas.json）。"""
+    from app.services.conversation import personas
+
+    return {"personas": personas.list_personas()}
+
+
+@router.post("/accounts/personas")
+async def create_persona(body: dict):
+    """新建/更新一个自定义人设。"""
+    from app.services.conversation import personas
+
+    try:
+        persona = personas.upsert_custom_persona(body or {})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"status": "created", "persona": persona}
+
+
+@router.delete("/accounts/personas/{persona_key}")
+async def delete_persona(persona_key: str):
+    """删除自定义人设（内置预设删不掉）。"""
+    from app.services.conversation import personas
+
+    if not personas.delete_custom_persona(persona_key):
+        raise HTTPException(404, f"没有这个自定义人设：{persona_key}")
+    return {"status": "deleted", "key": persona_key}
 
 
 @router.post("/accounts/{account_id}/check-session")
 async def check_session(account_id: str):
     """Lightweight session/cookie validity check for any platform."""
-    import json
 
     platform = None
 
@@ -292,7 +301,42 @@ async def check_session(account_id: str):
             from app.services.platform.facebook_adapter import FacebookAdapter
 
             adapter = FacebookAdapter(session_name=account_id)
+            # 先做便宜的本地检查（cookie 是否过期）；本地看着没问题再去 FB 真验一次——
+            # 以前这里只做本地检查，所以账号被安全验证墙挡住时也照样回"Cookie 有效"。
             result = await adapter.is_session_valid()
+            if result.get("valid"):
+                from app.core.cookie_import import verify_facebook_cookies
+
+                cookie_file = SESSION_DIR / f"{account_id}_cookies.json"
+                try:
+                    import json as _json
+
+                    cookies = _json.loads(cookie_file.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    cookies = []
+                if cookies:
+                    from app.core.config import settings
+
+                    live = await verify_facebook_cookies(
+                        cookies, proxy_url=settings.tg_proxy_url
+                    )
+                    blocked = "checkpoint" in (live.get("url") or "")
+                    if live.get("verified") is True:
+                        result["check_outcome"] = "green"
+                        result["message"] = "登录态有效（已在 Facebook 上实测通过）"
+                    elif live.get("verified") is False:
+                        result["check_outcome"] = "blocked" if blocked else "red"
+                        result["valid"] = False
+                        result["message"] = (
+                            "Facebook 要求安全验证（checkpoint）：请点「打开浏览器」完成验证后"
+                            "重新保存登录态"
+                            if blocked
+                            else "Facebook 上没有登录态，cookie 可能已失效，请重新登录"
+                        )
+                    else:
+                        reason = live.get("reason") or "本次没能连上 Facebook"
+                        result["check_outcome"] = "unknown"
+                        result["message"] = f"{result['message']}；但实测没跑成：{reason}"
         elif platform == "zalo":
             from app.services.platform.zalo_adapter import ZaloAdapter
 
@@ -303,18 +347,22 @@ async def check_session(account_id: str):
 
         result["platform"] = platform
 
-        # Update meta health based on result
-        meta_file = SESSION_DIR / f"{account_id}_meta.json"
-        meta = {}
-        if meta_file.exists():
-            with open(meta_file) as f:
-                meta = json.load(f)
-        if not result["valid"]:
-            meta["health"] = "red"
-        elif meta.get("health") == "red":
-            meta["health"] = "green"
-        with open(meta_file, "w") as f:
-            json.dump(meta, f)
+        # 统一把检测结论写回账号状态（含"为什么不是绿的"），别再各写各的
+        from app.core import account_status
+
+        outcome = result.get("check_outcome") or ("green" if result["valid"] else "red")
+        if outcome == "blocked":
+            account_status.record_platform_block(account_id, result.get("message") or "被平台拦下")
+        elif outcome == "green":
+            account_status.record_login_check(account_id, valid=True)
+        elif outcome == "unknown":
+            account_status.record_login_check(
+                account_id, valid=None, reason=result.get("message", "")
+            )
+        else:
+            account_status.record_login_check(
+                account_id, valid=False, reason=result.get("message", "")
+            )
 
         return result
     except Exception as e:
@@ -727,7 +775,7 @@ async def facebook_login_complete(body: dict):
     if cookie_file.exists():
         import json
 
-        with open(cookie_file) as f:
+        with open(cookie_file, encoding="utf-8") as f:
             cookies = json.load(f)
         payload = {
             "status": "success",

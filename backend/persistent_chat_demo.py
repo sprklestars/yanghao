@@ -31,6 +31,7 @@ from app.core.config import settings
 from app.core.processes import pid_alive
 from app.core.proxy import telegram_proxy
 from app.core.session_paths import ensure_session_dir
+from app.services.conversation.personas import resolve_persona_config
 
 
 def _resolve_session_name() -> str:
@@ -44,42 +45,9 @@ def _resolve_session_name() -> str:
 SESSION_NAME = _resolve_session_name()
 PROXY = telegram_proxy()
 
-PERSONA_PRESETS = {
-    "designer": {
-        "name": "Nguyen Van A",
-        "age": 28,
-        "occupation": "Freelance graphic designer",
-        "location": "Ho Chi Minh City",
-        "backstory": "在胡志明市做自由设计师3年，经常需要换汇和找外包合作。",
-        "tone": "casual, friendly, slightly naive",
-    },
-    "trader": {
-        "name": "Tran Minh Duc",
-        "age": 32,
-        "occupation": "Crypto trader",
-        "location": "Hanoi",
-        "backstory": "做了5年加密货币交易，熟悉OTC场外交易和各种换汇渠道。",
-        "tone": "confident, knowledgeable, direct",
-    },
-    "student": {
-        "name": "Le Thi Mai",
-        "age": 22,
-        "occupation": "University student",
-        "location": "Da Nang",
-        "backstory": "大四学生，学国际贸易，想找兼职和实习机会。",
-        "tone": "curious, polite, eager to learn",
-    },
-    "business": {
-        "name": "Pham Hoang Nam",
-        "age": 35,
-        "occupation": "Import-export business owner",
-        "location": "Ho Chi Minh City",
-        "backstory": "经营进出口贸易公司8年，需要频繁跨境支付和换汇。",
-        "tone": "professional, experienced, trustworthy",
-    },
-}
-
-PERSONA_CONFIG = PERSONA_PRESETS["designer"]
+# 人设统一走 app/services/conversation/personas.py 的注册表（内置 + 自定义），
+# 这样"账号管理"里选的（包括自己新建的）人设在这里才真的会生效。
+PERSONA_CONFIG = resolve_persona_config("designer")
 
 CATEGORY = "currency_exchanger"
 
@@ -179,13 +147,16 @@ class PersistentChatBot:
         meta_file = Path(SESSION_NAME).parent / f"{session_name}_meta.json"
         if meta_file.exists():
             try:
-                with open(meta_file) as f:
+                # 显式 utf-8：meta 里有中文（健康原因、人设名），
+                # Windows 默认 GBK 会解码失败，导致这些设置静默失效
+                with open(meta_file, encoding="utf-8") as f:
                     meta = json.load(f)
                 self.reply_policy = meta.get("reply_policy", self.reply_policy)
                 self.paused = meta.get("paused", False)
                 persona_key = meta.get("persona")
-                if persona_key and persona_key in PERSONA_PRESETS:
-                    self.persona_config = PERSONA_PRESETS[persona_key]
+                if persona_key:
+                    # 自定义人设也在这里生效（注册表里内置+自定义都有）
+                    self.persona_config = resolve_persona_config(persona_key)
             except Exception:
                 pass
 

@@ -42,7 +42,9 @@ export default function AccountsPage() {
   const [chatView, setChatView] = useState<string | null>(null);
   const [liveMessages, setLiveMessages] = useState<LiveMessage[]>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const personaBtnRef = useRef<HTMLButtonElement>(null);
+  // 人设下拉的定位：按"被点击的那个按钮"算，不能用共享 ref
+  // （以前所有账号卡片共用一个 ref，点 Telegram 的按钮弹出来的位置是最后一个卡片的）
+  const [personaMenuStyle, setPersonaMenuStyle] = useState<React.CSSProperties>({});
 
   // Login modal state
   const [showLoginModal, setShowLoginModal] = useState(false);
@@ -68,6 +70,12 @@ export default function AccountsPage() {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [personaPresets, setPersonaPresets] = useState<PersonaPreset[]>([]);
   const [personaSelector, setPersonaSelector] = useState<string | null>(null);
+  const [showPersonaForm, setShowPersonaForm] = useState(false);
+  const [personaForm, setPersonaForm] = useState({
+    name: '', desc: '', tone: '', age: '', occupation: '', location: '', backstory: '',
+  });
+  const [personaFormError, setPersonaFormError] = useState('');
+  const [showStatusLegend, setShowStatusLegend] = useState(false);
 
   const loadData = async () => {
     try {
@@ -160,11 +168,11 @@ export default function AccountsPage() {
 
   const getHealthBadge = (health: string) => {
     switch (health) {
-      case 'green': return { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500', label: '健康' };
-      case 'yellow': return { bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500', label: '警告' };
-      case 'red': return { bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', dot: 'bg-rose-500', label: '危险' };
-      case 'black': return { bg: 'bg-gray-900', text: 'text-white', border: 'border-gray-700', dot: 'bg-gray-900', label: '封禁' };
-      default: return { bg: 'bg-slate-50', text: 'text-slate-600', border: 'border-slate-200', dot: 'bg-slate-400', label: '未知' };
+      case 'green': return { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500', label: '健康', tip: '登录态有效，可以跑任务' };
+      case 'yellow': return { bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500', label: '注意', tip: '还能用，但需要留意（例如 cookie 快过期）' };
+      case 'red': return { bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', dot: 'bg-rose-500', label: '失效', tip: '登录态已失效，需要重新登录' };
+      case 'black': return { bg: 'bg-gray-900', text: 'text-white', border: 'border-gray-700', dot: 'bg-gray-900', label: '需人工', tip: '被平台拦下（安全验证/封号等），必须人工处理后才能继续' };
+      default: return { bg: 'bg-slate-50', text: 'text-slate-600', border: 'border-slate-200', dot: 'bg-slate-400', label: '未知', tip: '还没检测过' };
     }
   };
 
@@ -250,6 +258,79 @@ export default function AccountsPage() {
       loadData();
     } catch (e) {
       console.error('Failed to set persona:', e);
+    }
+  };
+
+  const reloadPersonas = async () => {
+    try {
+      const data = await accountAPI.listPersonas();
+      if (data?.personas) setPersonaPresets(data.personas);
+    } catch (e) {
+      console.error('Failed to load personas:', e);
+    }
+  };
+
+  const closePersonaMenu = () => {
+    setPersonaSelector(null);
+    setShowPersonaForm(false);
+    setPersonaFormError('');
+  };
+
+  // 下拉定位：贴着"被点的那个按钮"，并且不超出窗口（下面放不下就往上弹）
+  const openPersonaMenu = (accountId: string, event: React.MouseEvent<HTMLButtonElement>) => {
+    if (personaSelector === accountId) {
+      closePersonaMenu();
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = 320;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    const spaceBelow = window.innerHeight - rect.bottom - 12;
+    const openUp = spaceBelow < 260 && rect.top > spaceBelow;
+    setPersonaMenuStyle(
+      openUp
+        ? { left, bottom: window.innerHeight - rect.top + 6, maxHeight: Math.max(200, rect.top - 12) }
+        : { left, top: rect.bottom + 6, maxHeight: Math.max(200, spaceBelow) },
+    );
+    setPersonaFormError('');
+    setPersonaSelector(accountId);
+  };
+
+  const handleCreatePersona = async () => {
+    if (!personaForm.name.trim()) {
+      setPersonaFormError('人设名不能为空');
+      return;
+    }
+    try {
+      const created = await accountAPI.createPersona({
+        name: personaForm.name.trim(),
+        desc: personaForm.desc.trim(),
+        tone: personaForm.tone.trim(),
+        age: personaForm.age ? Number(personaForm.age) : undefined,
+        occupation: personaForm.occupation.trim(),
+        location: personaForm.location.trim(),
+        backstory: personaForm.backstory.trim(),
+      });
+      await reloadPersonas();
+      // 建完直接给当前账号选中，省一次点击
+      if (personaSelector && created?.persona?.key) {
+        await accountAPI.setPersona(personaSelector, created.persona.key);
+        loadData();
+      }
+      setPersonaForm({ name: '', desc: '', tone: '', age: '', occupation: '', location: '', backstory: '' });
+      setShowPersonaForm(false);
+      closePersonaMenu();
+    } catch (e: any) {
+      setPersonaFormError(e?.message || '创建人设失败');
+    }
+  };
+
+  const handleDeletePersona = async (key: string) => {
+    try {
+      await accountAPI.deletePersona(key);
+      await reloadPersonas();
+    } catch (e: any) {
+      setPersonaFormError(e?.message || '删除人设失败');
     }
   };
 
@@ -379,11 +460,33 @@ export default function AccountsPage() {
           <button onClick={loadData} className="px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 text-sm font-medium transition-colors shadow-sm">
             刷新
           </button>
+          <button
+            onClick={() => setShowStatusLegend((v) => !v)}
+            className="px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 text-sm font-medium transition-colors shadow-sm"
+          >
+            ⓘ 状态说明
+          </button>
           <button onClick={openLoginModal} className="px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 text-sm font-medium transition-colors shadow-sm">
             + 添加账号
           </button>
         </div>
       </div>
+
+      {showStatusLegend && (
+        <div className="mb-4 p-4 bg-white border border-slate-200 rounded-xl text-sm text-slate-600 space-y-2">
+          <div className="font-semibold text-slate-800">账号状态怎么看</div>
+          <div className="grid gap-1.5 sm:grid-cols-2">
+            <div>🟢 <b>健康</b>：登录态有效，可以跑任务</div>
+            <div>🟡 <b>注意</b>：还能用但需留意（例如 cookie 快过期）</div>
+            <div>🔴 <b>失效</b>：登录态过期/失效，需要重新登录</div>
+            <div>⚫ <b>需人工</b>：被平台拦下（安全验证、封号等），必须人工处理后才能继续</div>
+          </div>
+          <div className="text-xs text-slate-500 pt-1 border-t border-slate-100">
+            另外还有几个独立标记：<b>▶ 对话中 / ⏸ 已暂停</b>（暂停后不自动回复；目前只对 Telegram 常驻服务生效）、
+            <b>活跃 / 停用</b>（是否参与任务）、以及<b>养号阶段</b>（新号期 / 温号期 / 稳定期 / 成熟期，决定每日加群、私聊、发消息的限额）。
+          </div>
+        </div>
+      )}
 
       {!loaded ? (
         <div className="flex items-center justify-center py-20">
@@ -494,7 +597,10 @@ export default function AccountsPage() {
                                   <span className="opacity-0 group-hover/name:opacity-100 text-xs text-slate-400 transition-opacity">✏️</span>
                                 </div>
                               )}
-                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${health.bg} ${health.text} ${health.border}`}>
+                              <span
+                                title={health.tip}
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${health.bg} ${health.text} ${health.border}`}
+                              >
                                 <span className={`w-1.5 h-1.5 rounded-full ${health.dot}`} />
                                 {health.label}
                               </span>
@@ -510,6 +616,16 @@ export default function AccountsPage() {
                               <span className={account.is_active ? 'text-emerald-600' : 'text-rose-500'}>{account.is_active ? '活跃' : '停用'}</span>
                               {account.proxy_url && <span className="text-slate-400 truncate max-w-[200px]">{account.proxy_url}</span>}
                             </div>
+                            {/* 为什么不是"健康"：直接把后端给的原因显示出来 */}
+                            {account.health_reason && account.health !== 'green' && (
+                              <div
+                                className="mt-1 text-xs text-rose-600 flex items-start gap-1"
+                                title={account.health_reason}
+                              >
+                                <span>⚠️</span>
+                                <span className="line-clamp-2">{account.health_reason}</span>
+                              </div>
+                            )}
                             {/* Reply policy toggles */}
                             <div className="flex items-center gap-1.5 mt-2 flex-wrap">
                               <span className="text-xs text-slate-400 mr-1">回复策略:</span>
@@ -550,8 +666,7 @@ export default function AccountsPage() {
                               </button>
                               <div className="relative inline-block">
                                 <button
-                                  ref={personaBtnRef}
-                                  onClick={() => setPersonaSelector(personaSelector === account.id ? null : account.id)}
+                                  onClick={(e) => openPersonaMenu(account.id, e)}
                                   className="px-3 py-1 rounded-full text-xs font-medium border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors"
                                 >
                                   🎭 {personaPresets.find((p) => p.key === account.persona)?.name || '选择人设'}
@@ -904,38 +1019,116 @@ export default function AccountsPage() {
       {/* Persona selector dropdown (portal to avoid overflow clipping) */}
       {personaSelector && typeof document !== 'undefined' && createPortal(
         <>
-          <div className="fixed inset-0 z-40" onClick={() => setPersonaSelector(null)} />
+          <div className="fixed inset-0 z-40" onClick={closePersonaMenu} />
           <div
-            className="fixed z-50 w-64 bg-white border border-slate-200 rounded-lg shadow-xl overflow-hidden"
-            style={{
-              top: (() => {
-                const rect = personaBtnRef.current?.getBoundingClientRect();
-                return rect ? rect.bottom + 4 : 0;
-              })(),
-              left: (() => {
-                const rect = personaBtnRef.current?.getBoundingClientRect();
-                return rect ? rect.left : 0;
-              })(),
-            }}
+            className="fixed z-50 w-80 bg-white border border-slate-200 rounded-lg shadow-xl overflow-y-auto"
+            style={personaMenuStyle}
           >
             {personaPresets.map((p) => {
               const currentAccount = accounts.find((a) => a.id === personaSelector);
               const isActive = currentAccount?.persona === p.key;
               return (
-                <button
+                <div
                   key={p.key}
-                  onClick={() => handleSetPersona(personaSelector, p.key)}
-                  className={`w-full text-left px-3 py-2.5 hover:bg-slate-50 transition-colors border-b border-slate-50 last:border-0 ${isActive ? 'bg-indigo-50' : ''}`}
+                  className={`flex items-start gap-2 px-3 py-2.5 border-b border-slate-50 ${isActive ? 'bg-indigo-50' : ''}`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className={`text-sm font-medium ${isActive ? 'text-indigo-700' : 'text-slate-700'}`}>{p.name}</span>
-                    {isActive && <span className="text-indigo-500 text-xs">当前</span>}
-                  </div>
-                  <div className="text-xs text-slate-400 mt-0.5">{p.desc}</div>
-                  <div className="text-xs text-slate-400">风格: {p.tone}</div>
-                </button>
+                  <button
+                    onClick={() => handleSetPersona(personaSelector, p.key)}
+                    className="flex-1 text-left hover:opacity-80"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className={`text-sm font-medium ${isActive ? 'text-indigo-700' : 'text-slate-700'}`}>{p.name}</span>
+                      {isActive && <span className="text-indigo-500 text-xs">当前</span>}
+                    </div>
+                    {p.desc && <div className="text-xs text-slate-400 mt-0.5">{p.desc}</div>}
+                    {p.tone && <div className="text-xs text-slate-400">风格: {p.tone}</div>}
+                    {p.builtin === false && <div className="text-xs text-emerald-600">自定义</div>}
+                  </button>
+                  {p.builtin === false && (
+                    <button
+                      onClick={() => handleDeletePersona(p.key)}
+                      title="删除这个自定义人设"
+                      className="text-slate-300 hover:text-rose-500 px-1"
+                    >
+                      🗑
+                    </button>
+                  )}
+                </div>
               );
             })}
+
+            {showPersonaForm ? (
+              <div className="p-3 space-y-2 bg-slate-50">
+                <div className="text-xs font-semibold text-slate-600">新建人设</div>
+                <input
+                  value={personaForm.name}
+                  onChange={(e) => setPersonaForm({ ...personaForm, name: e.target.value })}
+                  placeholder="名字（必填），例如 Nguyen Van B"
+                  className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                />
+                <input
+                  value={personaForm.desc}
+                  onChange={(e) => setPersonaForm({ ...personaForm, desc: e.target.value })}
+                  placeholder="一句话描述，例如 二手车商，30岁，岘港"
+                  className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                />
+                <input
+                  value={personaForm.tone}
+                  onChange={(e) => setPersonaForm({ ...personaForm, tone: e.target.value })}
+                  placeholder="说话风格，例如 随和、爱开玩笑"
+                  className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    value={personaForm.age}
+                    onChange={(e) => setPersonaForm({ ...personaForm, age: e.target.value })}
+                    placeholder="年龄"
+                    className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                  />
+                  <input
+                    value={personaForm.location}
+                    onChange={(e) => setPersonaForm({ ...personaForm, location: e.target.value })}
+                    placeholder="城市"
+                    className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                  />
+                </div>
+                <input
+                  value={personaForm.occupation}
+                  onChange={(e) => setPersonaForm({ ...personaForm, occupation: e.target.value })}
+                  placeholder="职业"
+                  className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                />
+                <textarea
+                  value={personaForm.backstory}
+                  onChange={(e) => setPersonaForm({ ...personaForm, backstory: e.target.value })}
+                  placeholder="背景故事（会写进提示词，越具体越像真人）"
+                  rows={2}
+                  className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                />
+                {personaFormError && <div className="text-xs text-rose-600">{personaFormError}</div>}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowPersonaForm(false)}
+                    className="flex-1 px-3 py-1.5 border border-slate-200 rounded text-xs text-slate-600 hover:bg-white"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={handleCreatePersona}
+                    className="flex-1 px-3 py-1.5 bg-indigo-600 text-white rounded text-xs font-medium hover:bg-indigo-700"
+                  >
+                    创建并选用
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowPersonaForm(true)}
+                className="w-full px-3 py-2.5 text-xs font-medium text-indigo-600 hover:bg-indigo-50 text-left"
+              >
+                ＋ 新建自定义人设
+              </button>
+            )}
           </div>
         </>,
         document.body,

@@ -6,13 +6,18 @@ Supports: login, search groups, join groups, send friend requests, send/listen m
 import asyncio
 import logging
 import random
+import re
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+from urllib.parse import quote_plus
 
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import Browser, BrowserContext, Locator, Page, async_playwright
 
 from app.core.browser_launch import launch_browser
 from app.core.config import settings
+from app.core.session_paths import SESSION_DIR
 from app.services.platform.base import (
     AccountCredentials,
     AccountHealthStatus,
@@ -24,6 +29,205 @@ from app.services.platform.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def fb_cookie_path(session_name: str) -> Path:
+    """Facebook 登录态文件（绝对路径）。"""
+    return SESSION_DIR / f"{session_name}_cookies.json"
+
+
+# ── Facebook 页面解析的纯函数 ─────────────────────────────────────────────
+# 2026-09-26 实测（真实账号 cookie，无头浏览器）：
+# 这一版 Facebook 页面里 **完全没有 data-pagelet 属性** 了，
+# 旧代码靠 [data-pagelet="GroupsFeed::Group"] / [data-pagelet="MembersList::Member"]
+# 抓数据，所以永远抓到 0 条 —— 这就是"任务里搜不到群"的根因。
+# 现在改为按 role="article" 卡片 + /groups/、/user/ 链接来解析。
+
+_GROUP_HREF_RE = re.compile(r"/groups/([^/?#]+)")
+_USER_HREF_RES = (
+    re.compile(r"/user/(\d+)"),
+    re.compile(r"profile\.php\?id=(\d+)"),
+)
+# "35 K membres" / "6,2 K membres" / "1,234 members" / "4,1 K thành viên"
+_MEMBER_TEXT_RE = re.compile(
+    r"(\d[\d\s.,]*)\s*([KkMm])?\s*"
+    r"(?:membres?|members?|thành\s*viên|người\s*tham\s*gia)",
+    re.IGNORECASE,
+)
+
+# 加群按钮在 FB 上会按账号语言本地化（实测这个账号是法语 "Rejoindre le groupe"），
+# 所以不能用单一句子去匹配。
+JOIN_BUTTON_LABELS: tuple[str, ...] = (
+    "join group",
+    "join",
+    "rejoindre le groupe",
+    "rejoindre",
+    "tham gia nhóm",
+    "tham gia",
+    "加入小组",
+    "加入群组",
+    "加入",
+    "参加",
+)
+# 只有「群成员才会看到」的按钮，才能用来判断"已经在群里"。
+# 注意：不能拿 "Partager / Share" 当依据——实测没加入的群页面上也有分享按钮。
+# 也必须用完整短语：实测群页搜索框的 aria-label 是
+# "Quitter la saisie semi-automatique"（退出自动补全），只写 "quitter" 会误判成已入群。
+MEMBER_ONLY_LABELS: tuple[str, ...] = (
+    "quitter le groupe",
+    "leave group",
+    "rời nhóm",
+    "退出小组",
+    "invite des membres",
+    "inviter des membres",
+    "invite members",
+    "mời mọi người",
+)
+PENDING_LABELS: tuple[str, ...] = (
+    "demande envoyée",
+    "request sent",
+    "annuler la demande",
+    "đã gửi yêu cầu",
+    "已请求",
+)
+# 这些词一旦命中就说明是"退群/已加入/邀请/申请中"类按钮，绝不能当成加入按钮点下去
+NEVER_CLICK_WORDS: tuple[str, ...] = (
+    MEMBER_ONLY_LABELS + PENDING_LABELS + ("joined", "cancel", "annuler")
+)
+
+
+def parse_member_count(text: str) -> int:
+    """把 "6,2 K membres" 这类文案解析成数字（0 表示解析不出来）。"""
+    match = _MEMBER_TEXT_RE.search(text or "")
+    if not match:
+        return 0
+    raw, unit = match.group(1).strip(), (match.group(2) or "").lower()
+    try:
+        if unit:  # "6,2 K" 里的逗号是小数点
+            digits = raw.replace(" ", "")
+            if "," in digits and "." not in digits:
+                digits = digits.replace(",", ".")
+            value = float(digits)
+        else:  # "1,234 members" 里的逗号是千分位
+            value = float(re.sub(r"[\s.,]", "", raw) or 0)
+    except ValueError:
+        return 0
+    return int(value * {"k": 1_000, "m": 1_000_000}.get(unit, 1))
+
+
+def parse_group_search_results(items: list[dict], limit: int = 10) -> list[GroupInfo]:
+    """搜索结果卡片 → GroupInfo 列表（items 来自页面里的 {href, text}）。"""
+    results: list[GroupInfo] = []
+    seen: set[str] = set()
+    for item in items:
+        href = str(item.get("href") or "")
+        match = _GROUP_HREF_RE.search(href)
+        if not match:
+            continue
+        group_id = match.group(1)
+        if not group_id or group_id in seen:
+            continue
+        seen.add(group_id)
+
+        lines = [line.strip() for line in str(item.get("text") or "").split("\n") if line.strip()]
+        name = lines[0] if lines else group_id
+        description = " ".join(lines[1:])[:200]
+        results.append(
+            GroupInfo(
+                group_id=group_id,
+                name=name[:120],
+                member_count=parse_member_count(" ".join(lines)),
+                description=description,
+                platform=PlatformName.FACEBOOK,
+            )
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def parse_member_cards(items: list[dict], limit: int = 100) -> list[UserProfile]:
+    """成员卡片 → UserProfile 列表（items 来自页面里的 {href, text}）。"""
+    members: list[UserProfile] = []
+    seen: set[str] = set()
+    for item in items:
+        href = str(item.get("href") or "")
+        user_id = ""
+        for pattern in _USER_HREF_RES:
+            match = pattern.search(href)
+            if match:
+                user_id = match.group(1)
+                break
+        name = str(item.get("text") or "").strip()
+        if not user_id or user_id in seen or not name:
+            continue
+        seen.add(user_id)
+        members.append(UserProfile(user_id=user_id, display_name=name[:80]))
+        if len(members) >= limit:
+            break
+    return members
+
+
+def _extract_cards_script() -> str:
+    """在页面里把 role="article" 卡片抠成 {href, text}，避免依赖易变的 class。"""
+    return """
+        (selectors) => {
+            const out = [];
+            for (const card of document.querySelectorAll('div[role="article"]')) {
+                for (const selector of selectors) {
+                    const link = card.querySelector(selector);
+                    if (link) {
+                        out.push({
+                            href: link.getAttribute('href') || '',
+                            text: card.innerText || '',
+                        });
+                        break;
+                    }
+                }
+            }
+            return out;
+        }
+    """
+
+
+def _aria_label_selector(label: str, tag: str = "div") -> str:
+    """`aria-label` 里包含某个词的按钮选择器（大小写不敏感）。"""
+    return f'{tag}[role="button"][aria-label*="{label}" i]'
+
+
+def _visible_union(labels: tuple[str, ...]) -> str:
+    """把这些文案拼成"任一可见即命中"的 CSS（`:visible` 是 Playwright 的伪类）。"""
+    return ", ".join(f"{_aria_label_selector(label)}:visible" for label in labels)
+
+
+def _label_matches(value: str, words: tuple[str, ...]) -> bool:
+    text = (value or "").lower()
+    return any(word in text for word in words)
+
+
+# Facebook 的安全验证/登录墙：出现这些就说明"不是没搜到，是账号被拦了"
+_BLOCK_URL_MARKERS = ("/checkpoint", "/login", "/recover", "/suspended")
+_BLOCK_TEXT_MARKERS = (
+    "confirmez que vous êtes une personne réelle",
+    "confirm you're a real person",
+    "xác nhận bạn là người thật",
+    "确认真人",
+    "temporarily blocked",
+)
+
+
+def detect_block_reason(url: str, text: str = "") -> str | None:
+    """页面是不是被 Facebook 拦下了？是的话给出给人看的原因。"""
+    target = (url or "").lower()
+    if any(marker in target for marker in _BLOCK_URL_MARKERS):
+        return (
+            "Facebook 要求安全验证（checkpoint）：请到「账号管理」点「打开浏览器」"
+            "完成验证后重新保存登录态，再跑任务"
+        )
+    body = (text or "").lower()
+    if any(marker in body for marker in _BLOCK_TEXT_MARKERS):
+        return "Facebook 提示需要确认真人（安全验证），请先手动完成验证再跑任务"
+    return None
 
 
 class FacebookAdapter(PlatformAdapter):
@@ -39,6 +243,9 @@ class FacebookAdapter(PlatformAdapter):
         self._error_count = 0
         self._total_actions = 0
         self._is_authenticated = False
+        self._header_rendered = False  # 群页头（含加入按钮）是否已触发渲染
+        # 被 Facebook 安全验证拦下时的原因（给任务告警用，避免误报成"没搜到群"）
+        self.block_reason: str | None = None
 
     async def _human_delay(self, min_s: float = 0.5, max_s: float = 2.0):
         await asyncio.sleep(random.uniform(min_s, max_s))
@@ -119,7 +326,9 @@ class FacebookAdapter(PlatformAdapter):
             await Stealth().apply_stealth_async(self._page)
 
             # Try to load saved session
-            cookie_file = f"sessions/{self._session_name}_cookies.json"
+            # 用绝对路径：以前写的是相对路径 "sessions/..."，只有在 cwd=backend 时才找得到，
+            # 换个工作目录就会误判成"没有 cookie / cookie 文件不存在"。
+            cookie_file = fb_cookie_path(self._session_name)
             has_cookies = False
             try:
                 import json
@@ -188,7 +397,7 @@ class FacebookAdapter(PlatformAdapter):
             import os
 
             os.makedirs("sessions", exist_ok=True)
-            with open(f"sessions/{self._session_name}_cookies.json", "w") as f:
+            with open(fb_cookie_path(self._session_name), "w") as f:
                 json.dump(cookies, f)
 
             self._is_authenticated = True
@@ -216,51 +425,32 @@ class FacebookAdapter(PlatformAdapter):
         results: list[GroupInfo] = []
 
         try:
-            # Navigate to groups search
-            search_url = f"https://www.facebook.com/search/groups/?q={query}"
-            await self._page.goto(search_url, wait_until="networkidle")
+            search_url = f"https://www.facebook.com/search/groups/?q={quote_plus(query)}"
+            await self._page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+            await self._note_block_if_any()
+            # 结果卡片是异步渲染的，先等一等（拿不到也继续，后面解析为空自然返回 0）
+            try:
+                await self._page.wait_for_selector('div[role="article"]', timeout=15000)
+            except Exception:
+                logger.warning("Facebook 群搜索结果加载超时（query=%s），可能被风控或网络慢", query)
 
-            # Human-like scrolling
             for _ in range(3):
-                await self._page.evaluate("window.scrollBy(0, 500)")
-                await asyncio.sleep(random.uniform(1, 2))
+                await self._page.evaluate("window.scrollBy(0, 600)")
+                await asyncio.sleep(random.uniform(0.8, 1.6))
 
-            # Extract group information
-            groups = await self._page.query_selector_all('[data-pagelet="GroupsFeed::Group"]')
-
-            for i, group in enumerate(groups[:limit]):
-                try:
-                    name_elem = await group.query_selector('span[dir="auto"]')
-                    name = await name_elem.inner_text() if name_elem else f"Group {i + 1}"
-
-                    members_elem = await group.query_selector('span:text-matches("\\d+.*members?")')
-                    members_text = await members_elem.inner_text() if members_elem else "0 members"
-                    member_count = int("".join(filter(str.isdigit, members_text)) or "0")
-
-                    desc_elem = await group.query_selector("span:not([dir]):not([class])")
-                    description = await desc_elem.inner_text() if desc_elem else ""
-
-                    # Extract group ID from URL
-                    link_elem = await group.query_selector('a[href*="/groups/"]')
-                    href = await link_elem.get_attribute("href") if link_elem else ""
-                    group_id = (
-                        href.split("/groups/")[1].split("/")[0] if "/groups/" in href else str(i)
-                    )
-
-                    results.append(
-                        GroupInfo(
-                            group_id=group_id,
-                            name=name.strip(),
-                            member_count=member_count,
-                            description=description.strip()[:200],
-                            platform=PlatformName.FACEBOOK,
-                        )
-                    )
-                except Exception as e:
-                    logger.warning("Failed to extract group %d: %s", i, e)
-                    continue
+            items = await self._page.evaluate(
+                _extract_cards_script(), ['a[href*="/groups/"]']
+            )
+            results = parse_group_search_results(items, limit=limit)
 
             logger.info("Found %d Facebook groups for query: %s", len(results), query)
+            if not results:
+                logger.warning(
+                    "Facebook 群搜索没有解析出结果（query=%s，卡片数=%s）；"
+                    "如果账号没登录或页面被风控，先重新导入 cookie",
+                    query,
+                    len(items),
+                )
 
         except Exception as e:
             logger.error("search_groups error: %s", e)
@@ -268,31 +458,180 @@ class FacebookAdapter(PlatformAdapter):
 
         return results
 
+    async def find_join_button(self, timeout_s: float = 12.0) -> Locator | None:
+        """找**可见**的「加入小组」按钮，找不到返回 None。
+
+        实测（真实账号、无头浏览器）：
+        * 按钮文案按账号语言本地化，这个账号是法语 "Rejoindre le groupe"；
+        * 同一个按钮在 DOM 里有两份，其中一份是 `visibility:hidden` 的响应式副本；
+        * 不滚动的话它一直是 0x0（懒渲染），滚动之后才变成 180x36，
+          所以要先把页头"催"出来再等可见，否则会误判成"没有加入按钮"。
+        另外必须排除「退出小组 / 已申请」这类按钮，否则会误点成退群。
+        """
+        assert self._page is not None
+        await self._render_group_header()
+        deadline = time.monotonic() + timeout_s
+        # 先让 Playwright 自己在页面里等"可见的加入按钮"：一次查询、
+        # 由渲染进程判断，比我们在 Python 侧反复扫 DOM 快得多也准得多。
+        await self._wait_visible(JOIN_BUTTON_LABELS, max(1.0, timeout_s * 0.8))
+        selectors = [
+            ", ".join(
+                (
+                    _aria_label_selector(label),
+                    _aria_label_selector(label, "a"),
+                    f'div[role="button"]:has-text("{label}")',
+                )
+            )
+            for label in JOIN_BUTTON_LABELS
+        ]
+        while True:
+            for selector in selectors:
+                candidates = self._page.locator(selector)
+                try:
+                    count = await candidates.count()
+                except Exception:
+                    continue
+                for index in range(count):
+                    candidate = candidates.nth(index)
+                    try:
+                        aria = await candidate.get_attribute("aria-label") or ""
+                        text = (await candidate.inner_text() or "").strip()
+                    except Exception:
+                        continue
+                    if _label_matches(aria, NEVER_CLICK_WORDS) or _label_matches(
+                        text, NEVER_CLICK_WORDS
+                    ):
+                        continue  # 退群/已申请按钮，跳过
+                    try:
+                        if await candidate.is_visible():
+                            return candidate
+                    except Exception:
+                        continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            await asyncio.sleep(min(0.5, remaining))
+
+    async def _wait_visible(self, labels: tuple[str, ...], timeout_s: float) -> bool:
+        """等这些文案里任意一个按钮变成可见（超时返回 False，不抛异常）。"""
+        assert self._page is not None
+        try:
+            await self._page.wait_for_selector(
+                _visible_union(labels), timeout=int(timeout_s * 1000), state="visible"
+            )
+            return True
+        except Exception:
+            return False
+
+    async def _render_group_header(self) -> None:
+        """触发群页头渲染：FB 的「加入小组」按钮在滚动前一直是 0x0（懒渲染）。
+
+        实测（真实账号、无头）：打开群页面后按钮一直 `[0,0]`、Playwright 判定为不可见；
+        `window.scrollBy(0, 800)` 之后立刻变成 180x36 且可见——不滚动就永远找不到按钮，
+        这也是"有时能加群、有时说找不到按钮"的真正原因。
+        """
+        assert self._page is not None
+        if self._header_rendered:
+            return
+        for _ in range(2):
+            await self._page.evaluate("window.scrollBy(0, 800)")
+            await asyncio.sleep(1)
+        await self._page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(0.5)
+        self._header_rendered = True
+
+    async def _note_block_if_any(self) -> str | None:
+        """检查当前页面是不是被 FB 的安全验证拦下了，并记在 self.block_reason。"""
+        assert self._page is not None
+        try:
+            url = self._page.url
+            text = await self._page.evaluate("() => (document.body ? document.body.innerText : '')")
+        except Exception:
+            return self.block_reason
+        reason = detect_block_reason(url, str(text)[:2000])
+        if reason:
+            self.block_reason = reason
+            logger.warning("Facebook 拦下了这次访问：%s（url=%s）", reason, url)
+        return reason
+
+    async def _has_visible_label(self, label: str) -> bool:
+        assert self._page is not None
+        locator = self._page.locator(_aria_label_selector(label))
+        try:
+            count = await locator.count()
+        except Exception:
+            return False
+        for index in range(count):
+            try:
+                if await locator.nth(index).is_visible():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def group_join_state(self, timeout_s: float = 12.0) -> str:
+        """判断当前群页面状态：joined / pending / joinable / unknown。"""
+        deadline = time.monotonic() + timeout_s
+        await self._render_group_header()
+        # 群页头是异步渲染的：先让 Playwright 等"任意一个相关按钮可见"，
+        # 等不到再按下面的循环扫（真实页面上这一步约 5 秒）。
+        await self._wait_visible(
+            MEMBER_ONLY_LABELS + PENDING_LABELS + JOIN_BUTTON_LABELS,
+            max(1.0, timeout_s * 0.8),
+        )
+        while True:
+            # 先看"能不能加入"：这版的群页只有成员才显示「退出小组」，
+            # 而"邀请/退出"类文案容易和页面其它按钮撞车，所以以加入按钮为准。
+            if await self.find_join_button(timeout_s=1.0) is not None:
+                return "joinable"
+            for label in MEMBER_ONLY_LABELS:
+                if await self._has_visible_label(label):
+                    return "joined"
+            for label in PENDING_LABELS:
+                if await self._has_visible_label(label):
+                    return "pending"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "unknown"
+            await asyncio.sleep(min(0.5, remaining))
+
     async def join_group(self, group_id: str) -> bool:
         """Join a Facebook group."""
         assert self._page is not None
 
         try:
             group_url = f"https://www.facebook.com/groups/{group_id}"
-            await self._page.goto(group_url, wait_until="networkidle")
-
-            # Find and click join button
-            join_button = await self._page.query_selector(
-                'button:has-text("Tham gia"), button:has-text("Join")'
-            )
-
-            if join_button:
-                await join_button.click()
-                self._daily_actions += 1
-                self._total_actions += 1
-
-                # Human-like delay after action
-                await asyncio.sleep(random.uniform(30, 120))
-                logger.info("Successfully joined Facebook group: %s", group_id)
-                return True
-            else:
-                logger.warning("Join button not found for group: %s", group_id)
+            await self._page.goto(group_url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(random.uniform(1, 2))
+            if await self._note_block_if_any():
                 return False
+            await self._render_group_header()
+
+            state = await self.group_join_state()
+            if state == "joined":
+                logger.info("已在群里，跳过加入: %s", group_id)
+                return True
+            if state == "pending":
+                logger.info("加群申请还在审核中，先跳过: %s", group_id)
+                return False
+
+            join_button = await self.find_join_button(timeout_s=3.0)
+            if join_button is None:
+                logger.warning(
+                    "找不到「加入小组」按钮（group=%s，可能是需要管理员审批的私有群，"
+                    "或按钮文案是别的语言）",
+                    group_id,
+                )
+                return False
+
+            await join_button.click()
+            self._daily_actions += 1
+            self._total_actions += 1
+            # 保留原来的拟人化停顿（30-120s）：加群是高风险动作，
+            # 这里不要为了跑得快把防封延迟去掉。
+            await asyncio.sleep(random.uniform(30, 120))
+            logger.info("已提交加入申请: %s", group_id)
+            return True
 
         except Exception as e:
             logger.error("join_group error: %s", e)
@@ -670,43 +1009,36 @@ class FacebookAdapter(PlatformAdapter):
 
         try:
             members_url = f"https://www.facebook.com/groups/{group_id}/members"
-            await self._page.goto(members_url, wait_until="networkidle")
+            await self._page.goto(members_url, wait_until="domcontentloaded", timeout=60000)
 
             # Scroll to load members
             for _ in range(5):
                 await self._page.evaluate("window.scrollBy(0, 800)")
                 await asyncio.sleep(random.uniform(1, 2))
 
-            # Extract member information
-            member_elements = await self._page.query_selector_all(
-                '[data-pagelet="MembersList::Member"]'
+            # 成员卡片：优先 role="article"，退一步直接收页面里的个人主页链接
+            items = await self._page.evaluate(
+                _extract_cards_script(), ['a[href*="/user/"], a[href*="profile.php?id="]']
             )
-
-            for member_elem in member_elements[:limit]:
-                try:
-                    link = await member_elem.query_selector("a")
-                    href = await link.get_attribute("href") if link else ""
-                    user_id = (
-                        href.split("/profile.php?id=")[1].split("&")[0]
-                        if "profile.php?id=" in href
-                        else ""
-                    )
-
-                    name_elem = await member_elem.query_selector('span[dir="auto"]')
-                    name = await name_elem.inner_text() if name_elem else "Unknown"
-
-                    if user_id:
-                        members.append(
-                            UserProfile(
-                                user_id=user_id,
-                                display_name=name.strip(),
-                            )
-                        )
-                except Exception as e:
-                    logger.warning("Failed to extract member: %s", e)
-                    continue
+            if not items:
+                items = await self._page.evaluate(
+                    """() => [...document.querySelectorAll(
+                            'a[href*="/user/"], a[href*="profile.php?id="]')]
+                        .map(a => ({
+                            href: a.getAttribute('href') || '',
+                            text: (a.innerText || '').trim(),
+                        }))"""
+                )
+            members = parse_member_cards(items, limit=limit)
 
             logger.info("Retrieved %d members from Facebook group: %s", len(members), group_id)
+            if not members:
+                # 实测：Facebook 只对**群成员**开放成员列表，没加入的群打开 /members 是空白页。
+                logger.warning(
+                    "群 %s 没取到成员：Facebook 只对已加入的群开放成员列表，"
+                    "如果加群还在审批中，这一步会一直是 0",
+                    group_id,
+                )
 
         except Exception as e:
             logger.error("get_group_members error: %s", e)
@@ -736,7 +1068,7 @@ class FacebookAdapter(PlatformAdapter):
         import os
         import time
 
-        cookie_file = f"sessions/{self._session_name}_cookies.json"
+        cookie_file = fb_cookie_path(self._session_name)
         if not os.path.exists(cookie_file):
             return {"valid": False, "message": "Cookie 文件不存在，请先登录", "details": {}}
         try:
