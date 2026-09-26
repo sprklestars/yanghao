@@ -15,6 +15,7 @@ from unittest.mock import patch
 from sqlalchemy import delete, select, text
 
 import app.workers.tasks as tasks
+from app.core.config import settings
 from app.core.database import async_session_factory, sync_engine
 from app.core.database import engine as async_engine
 from app.models.models import (
@@ -93,6 +94,14 @@ class FakeAdapter:
 
     async def disconnect(self) -> None:
         self.disconnected = True
+
+
+class HangingAdapter(FakeAdapter):
+    """搜索永远不返回，用来验证超时保护。"""
+
+    async def search_groups(self, query: str, limit: int = 10):
+        await asyncio.sleep(30)
+        return []
 
 
 async def fake_start_conversation(
@@ -229,6 +238,69 @@ class PlatformPipelineTests(unittest.TestCase):
                 tasks._run_task_pipeline(str(task.id))
         status, _ = self._read_and_cleanup(task.id, "none")
         self.assertEqual(status, "failed")
+
+    def test_account_timeout_is_skipped_not_fatal(self):
+        """一个账号卡住 → 只跳过它，任务本身照常收尾（不再占住 worker）。"""
+        account_name = "tmoqa"
+        task = self._create_task(Platform.FACEBOOK, "__qa_timeout__")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session_dir = Path(tmp)
+            (session_dir / f"{account_name}_cookies.json").write_text("[]", encoding="utf-8")
+            _reset_async_pool()
+            with (
+                patch.object(tasks, "SESSION_DIR", session_dir),
+                patch("app.core.session_paths.SESSION_DIR", session_dir),
+                patch.object(
+                    tasks,
+                    "_build_adapter",
+                    side_effect=lambda p, s: (
+                        HangingAdapter(p.value),
+                        type("Creds", (), {"credentials": {}, "username": account_name})(),
+                    ),
+                ),
+                patch.object(tasks, "_set_progress", lambda *a, **k: None),
+                patch.object(settings, "adapter_timeout_seconds", 1),
+            ):
+                tasks._run_task_pipeline(str(task.id))
+
+        status, last_run = self._read_and_cleanup(task.id, account_name)
+        self.assertEqual(status, "completed")
+        self.assertIn("timeout", last_run["accounts"][account_name])
+        self.assertIn("超时", last_run["warning"])
+
+    def test_running_peer_blocks_start(self):
+        """同一平台已有任务在跑时，另一个任务的启动要被明确拒绝。"""
+        from fastapi.testclient import TestClient
+
+        from app.core.database import SessionLocal
+        from app.main import app
+        from app.models.models import TaskStatus
+
+        first = self._create_task(Platform.FACEBOOK, "__qa_peer1__")
+        second = self._create_task(Platform.FACEBOOK, "__qa_peer2__")
+
+        db = SessionLocal()
+        try:
+            row = db.execute(select(Task).where(Task.id == first.id)).scalar_one()
+            row.status = TaskStatus.RUNNING
+            db.commit()
+        finally:
+            db.close()
+
+        _reset_async_pool()
+        client = TestClient(app)
+        with patch.object(settings, "api_token", ""):
+            response = client.post(f"/api/v1/tasks/{second.id}/start")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("已有", response.json()["detail"])
+
+        db = SessionLocal()
+        try:
+            db.execute(delete(Task).where(Task.id.in_([first.id, second.id])))
+            db.commit()
+        finally:
+            db.close()
 
 
 class AdapterFactoryTests(unittest.TestCase):

@@ -400,6 +400,8 @@ mypy .
 
 26. **FB/Zalo 外呼流水线接入（最后一项）**：`run_task` 去掉平台分支，三个平台共用「搜群→加群→取目标→私聊」；账号按 `config.accounts` 指定或自动挑第一个登录态文件（`sessions/*.session` / `*_cookies.json` / `*_zalo.json`，命名约定集中在 `app/core/session_paths.py` 的 `PLATFORM_SESSION_SUFFIX` / `platform_session_path` / `platform_session_name`）。适配器构造在 `_build_adapter()`：Telegram 用 `TG_PROXY_URL` 代理，Facebook 把同一个代理传给 Playwright（`credentials["proxy"]`），Zalo 从 `_zalo.json` 里读 `phone`/`imei`（zlapi 即使复用 cookie 也要 phone）。`POST /tasks/{id}/start` 与定时开关现在三平台都放行，但**要求该平台已有登录态文件**（否则 400 说明缺哪种文件）；常驻服务占用同一份登录态时也会被拦。FB/Zalo 的平台限流在 `_run_account_campaign` 里统一施加（Telegram 由适配器内部处理，避免重复计数）。`last_run` 新增 `platform` 与 `blocked_by_limit`。**能力差异**：FB 是真实 Playwright 自动化（选择器随改版可能失效）；Zalo 非官方接口不支持群搜索，只能列已加入的群，加群多需邀请链接。测试：`tests/test_task_pipeline_platforms.py` 用替身适配器跑完整流水线（无数据库环境自动跳过）。**已知缺口**：适配器调用没有超时保护——实测遇到 Telegram 连接被服务器重置时，solo 池的 worker 会卡在那次任务里不再应答（重启 worker 即可恢复），后续应给适配器调用加 `asyncio.wait_for`。
 
+27. **适配器超时保护 + worker 线程池**（第 26 条末尾提到的"已知缺口"已在本条修掉）：新增 `app/core/async_utils.py` 的 `with_timeout()` / `OperationTimeoutError`，账户鉴权与所有外部动作（搜索/加群/取成员）都套上它，秒数由 `.env` 的 `ADAPTER_TIMEOUT_SECONDS`（默认 90）控制。**一个账号超时只跳过该账号**（`sub["timeout"]` 记原因、断开后换下一个账号），不会让整条任务挂住；`last_run.warning` 优先提示"有账号调用超时被跳过"。同时把 Windows 上的 worker 从 `--pool=solo` 换成 `--pool=threads --concurrency=2`：solo 只有一个执行位，一个卡住的连接会让整个 worker 不再应答（只能重启恢复），线程池至少留一个空位。因为并发变成 2，`POST /tasks/{id}/start` 新增守卫：**同一平台已有任务 RUNNING 时拒绝启动**（否则两个任务会抢同一批账号的登录态）。测试：`tests/test_async_utils.py`（超时/断连归类）+ `tests/test_task_pipeline_platforms.py` 的"卡住账号被跳过、任务照常收尾"与"同平台运行中的任务会拦住启动"。
+
 ## 12. 文档索引（均在仓库根目录）
 
 | 文档 | 内容 | 时效 |

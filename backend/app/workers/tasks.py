@@ -8,6 +8,7 @@ from pathlib import Path
 from celery import Celery
 from sqlalchemy import select
 
+from app.core.async_utils import OperationTimeoutError, with_timeout
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.processes import pid_alive
@@ -262,7 +263,11 @@ async def _run_account_campaign(
             raise TaskCancelledError()
         _set_progress(db, task, stage="搜索群组", keyword=keyword, account=account.username)
         logger.info("[%s] Searching for keyword: %s", account.username, keyword)
-        groups = await adapter.search_groups(query=keyword, limit=search_limit)
+        groups = await with_timeout(
+            adapter.search_groups(query=keyword, limit=search_limit),
+            settings.adapter_timeout_seconds,
+            f"搜索群组({keyword})",
+        )
         sub["searched_keywords"] += 1
 
         for group in groups:
@@ -287,12 +292,20 @@ async def _run_account_campaign(
                     sub["blocked_by_limit"] = sub.get("blocked_by_limit", 0) + 1
                     continue
 
-            joined = await adapter.join_group(group.group_id)
+            joined = await with_timeout(
+                adapter.join_group(group.group_id),
+                settings.adapter_timeout_seconds,
+                f"加入群组({group.name})",
+            )
             if not joined:
                 continue
             sub["joined_groups"] += 1
 
-            members = await adapter.get_group_members(group.group_id, limit=member_scan)
+            members = await with_timeout(
+                adapter.get_group_members(group.group_id, limit=member_scan),
+                settings.adapter_timeout_seconds,
+                f"获取群成员({group.name})",
+            )
             _set_progress(
                 db,
                 task,
@@ -424,7 +437,18 @@ def _run_task_pipeline(task_id: str):
                         logger.error("构造适配器失败：%s", e)
                         continue
 
-                    if not await adapter.authenticate(credentials):
+                    try:
+                        authenticated = await with_timeout(
+                            adapter.authenticate(credentials),
+                            settings.adapter_timeout_seconds,
+                            f"[{task.platform.value}] 账号鉴权({session_name})",
+                        )
+                    except OperationTimeoutError as e:
+                        logger.warning("%s；跳过该账号", e)
+                        await adapter.disconnect()
+                        continue
+
+                    if not authenticated:
                         logger.warning(
                             "[%s] 账号 %s 未登录/登录态失效，跳过",
                             task.platform.value,
@@ -454,6 +478,10 @@ def _run_task_pipeline(task_id: str):
                         await _run_account_campaign(
                             db, task, acct, adapter, sub, platform=task.platform
                         )
+                    except OperationTimeoutError as e:
+                        # 单个账号卡住只跳过它，别拖垮整条任务（其它账号继续）
+                        logger.warning("[%s] %s；跳过该账号剩余动作", session_name, e)
+                        sub["timeout"] = str(e)
                     finally:
                         # 一个账号跑完就断开，释放登录态给下一个账号
                         await adapter.disconnect()
@@ -493,7 +521,12 @@ def _run_task_pipeline(task_id: str):
                 db.commit()
                 return
 
-            if summary["found_groups"] == 0:
+            if any(
+                isinstance(sub, dict) and sub.get("timeout")
+                for sub in (summary["accounts"] or {}).values()
+            ):
+                summary["warning"] = "有账号调用超时被跳过（网络/连接不稳定），本轮产出不完整"
+            elif summary["found_groups"] == 0:
                 summary["warning"] = "未搜到任何群"
             elif summary["members_found"] == 0:
                 summary["warning"] = "未获取到任何可私聊目标"

@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # 留空则直连。协议写错时 Telethon 只会报 "Connection to Telegram failed N time(s)"，
     # 详见 app/core/proxy.py。
     tg_proxy_url: str = "socks5://127.0.0.1:7890"
+    # 单个适配器调用（搜索/加群/取成员/发消息）的超时秒数。
+    # 卡死的连接必须在有限时间内放弃，否则会占住 worker 的执行位。
+    adapter_timeout_seconds: int = 90
 
     # Database (must be set in .env)
     database_url: str = ""

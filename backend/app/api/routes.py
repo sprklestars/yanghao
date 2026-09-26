@@ -1021,6 +1021,25 @@ async def start_task(task_id: str, db: AsyncSession = Depends(get_db)):
     if task.status == TaskStatus.RUNNING:
         raise HTTPException(status_code=400, detail="任务已在运行中")
 
+    # 同一平台已有任务在跑：它们会抢同一批账号的登录态（worker 并发 2）
+    running_peer = (
+        await db.execute(
+            select(Task)
+            .where(Task.id != task_uuid)
+            .where(Task.platform == task.platform)
+            .where(Task.status == TaskStatus.RUNNING)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if running_peer is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"已有 {task.platform.value} 任务在运行（{running_peer.name}）。"
+                "同一平台的任务会争抢同一批账号的登录态，请等它结束或先取消它。"
+            ),
+        )
+
     # 三平台都支持外呼，但必须先有对应平台的登录态文件
     suffix = PLATFORM_SESSION_SUFFIX[task.platform.value]
     session_files = sorted(SESSION_DIR.glob(f"*{suffix}"))
@@ -1517,7 +1536,10 @@ SERVICE_MAP = {
             "app.workers.tasks",
             "worker",
             "--loglevel=info",
-            "--pool=solo" if os.name == "nt" else "--pool=prefork",
+            # Windows 上用线程池：solo 只有一个执行位，一个卡住的任务会让整个
+            # worker 不再应答（实测过）；线程池 + 并发 2 至少留一个空位。
+            "--pool=threads" if os.name == "nt" else "--pool=prefork",
+            "--concurrency=2",
         ],
     },
     # 定时触发器：每分钟扫一次任务表，把到点的任务交给 worker
