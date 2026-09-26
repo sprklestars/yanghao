@@ -196,6 +196,7 @@ IDLE → VERIFICATION → GREETING → PROBING → EXTRACTION → EXIT
 
 - **互斥规则**：同一个 Telegram 账号同一时刻只能有一个客户端（Telegram 侧限制 + 本地 SQLite 单写锁），所以「常驻在线服务」和「外呼任务」不能同时跑。API 现在**双向拦截**并给中文原因：任务启动时若服务在跑 → 400 提示先停止服务；服务启动时若有任务处于 RUNNING → 400 提示先结束任务。
 - 想同时做"在线接客"和"主动外呼"，就用**两个账号**，各挂一个。
+- **拉黑名单**是跨进程共享的 `backend/state/blocklist.json`（已 gitignore）：对话页点「拉黑」= 结束会话 + 写入名单，守护进程据此不再回复；`GET /blocklist` 查看、`DELETE /blocklist/{user_id}` 取消。
 - 「未检测到 Celery worker」不再是错误：`POST /tasks/{id}/start` 会先 ping worker，没有就自动拉起一个，仍不可用才回退进程内直跑，并在响应里返回 `mode: celery|inline`；任务页顶部常显调度器状态和一键启动按钮。
 - 每次外呼跑完会把摘要写进 `task.config["last_run"]`（搜了几个关键词 / 找到、加入多少群 / 起了多少会话），任务页直接显示，避免"完成了却不知道做了什么"。
 - **定时执行**：`PUT /tasks/{id}/schedule` 把 `{enabled, mode: daily|interval, at|every_minutes}` 写进 `task.config["schedule"]` 并算出 `next_run_at`；开启时自动确保 worker + beat 在跑。`scan_task_schedules` 到点派发，遇到「上一次还在跑」或「常驻在线服务占用账号」就跳过并顺延（写 `last_skipped_reason`）。
@@ -230,6 +231,8 @@ IDLE → VERIFICATION → GREETING → PROBING → EXTRACTION → EXIT
 群组：`POST /groups/search`（支持 AI 关键词扩展）、`POST /groups/join`、`POST /groups/add-by-link`
 
 任务/对话/情报：`POST|GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/start`、`POST /tasks/{id}/cancel`（运行中则立 `cancel_requested` 标记，流水线在下个检查点停；未运行直接置 FAILED + `last_run.error=用户取消`）、`POST /tasks/{id}/pause`（仅未运行的任务；运行中的只能取消）、`DELETE /tasks/{id}`（按依赖顺序删消息 → 会话 → 情报 → 任务；外键没有 ondelete cascade）、`GET /conversations`、`GET /conversations/{id}`、`POST /conversations/{id}/end`（前端「拉黑」按钮走这里：只置 `ended_at` + 状态为 exit + WebSocket 通知，**并不写入 blocklist**）、`GET /intelligence`
+
+> 上面那条「拉黑按钮不写 blocklist」已过期：现在 `POST /conversations/{id}/end` 会同时**结束会话 + 写入黑名单**（跨进程文件共享），另有 `GET /blocklist`、`DELETE /blocklist/{user_id}` 管理名单。
 
 > `tasks/{id}/start` 只拦「正在运行」的任务（`PENDING` 是新建任务的默认状态、界面上叫"等待中"，不代表"已在运行"）；派发前先 ping Celery worker，**没有 worker 就在 API 进程内用 `run_task.apply()` 直接执行**并在响应里回 `mode: "inline"`，否则任务只会永远挂在"运行中"（本机通常只开 uvicorn + next，没有 worker）。
 
@@ -360,8 +363,8 @@ mypy .
 
 12. **有若干模块写好了但没接进主流程**（全仓库搜索无任何 import）：`RateLimiter` / `AccountHealthMonitor`（`security/rate_limiter.py`）、`StrategyEngine`（`conversation/strategy_engine.py`）、`ScriptLibrary`（`conversation/script_library.py`）。目前真正拦截操作的是 `account_warming.warming_manager`，另外打字/冷却延迟是直接写在适配器里的。所以文档里描述的平台级限流、A/B 话术、策略优先级，实际都还没有生效——评估「系统现在能做到什么」时别被文档带跑。
 
-13. **拉黑链路不完整**：`BlockListManager` 是进程内集合，且只在 `persistent_chat_demo.py` 里被判读（`is_blocked(user_id)`）；`routes.py` 的 `POST /conversations/{id}/end` 并不写入 blocklist（**且因为它是独立进程，写内存也传不到守护进程那边，要真生效得落 Redis/DB/文件**）。
-    ~~该端点用 `conv.state = "exit"` 赋小写字符串~~ ✅ **已修复**（改用 `ConversationState.EXIT`），同时修掉了同一处 `datetime.now(datetime.timezone.utc)` 这种取不到时区、必然 `AttributeError` 的写法——也就是说这个端点在修复前每次调用都会 500。
+13. ~~**拉黑链路不完整**~~ ✅ **已打通**：`BlockListManager` 改成 **JSON 文件持久化**（`backend/state/blocklist.json`，已 gitignore），按 `(mtime, size)` 自动重载，所以 API 和守护进程这两个独立进程能看到同一份名单；`POST /conversations/{id}/end` 现在**真的写入黑名单**并返回 `blocked`，守护进程下次收到该用户消息就会跳过。新增 `GET /blocklist`（名单）与 `DELETE /blocklist/{user_id}`（取消拉黑），前端对话页有可展开的黑名单面板。选文件而不是 Redis 的理由：零新依赖、离线可用，而这份名单数据量极小。
+     ~~该端点用 `conv.state = "exit"` 赋小写字符串~~ ✅ **已修复**（改用 `ConversationState.EXIT`），同时修掉了同一处 `datetime.now(datetime.timezone.utc)` 这种取不到时区、必然 `AttributeError` 的写法——也就是说这个端点在修复前每次调用都会 500。
 
 14. **前端演示数据已全部移除**（2026-09-25）：`DEMO_ACCOUNTS` / `DEMO_CONVERSATIONS` / `DEMO_INTELLIGENCE` / `MOCK_TASKS` / `DEMO_MESSAGES` 及 live-chat 的随机假消息定时器都已删除。因此现在"列表为空"会如实显示空状态，而 `backend/scripts/seed_demo_data.py` 仍会写入演示数据——要干净环境就别跑它。
 

@@ -60,6 +60,9 @@ secrets/
 *.log
 logs/
 
+# 运行时共享状态（黑名单等，跨进程用）
+state/
+
 # OS
 .DS_Store
 Thumbs.db

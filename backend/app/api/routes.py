@@ -1261,6 +1261,8 @@ async def end_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
     """End a conversation and mark the target user as blocked."""
     from datetime import datetime, timezone
 
+    from app.services.security.blocklist import block_user
+
     result = await db.execute(select(Conversation).where(Conversation.id == conv_id))
     conv = result.scalar_one_or_none()
     if not conv:
@@ -1274,6 +1276,9 @@ async def end_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
 
     await db.commit()
 
+    # 真正写入黑名单（跨进程文件存储）：守护进程下次收到该用户消息就不会再回
+    blocked = block_user(conv.target_user_id, reason="operator_end_conversation")
+
     # Notify via WebSocket
     await _get_manager().send_to_task(
         str(conv.task_id),
@@ -1285,7 +1290,30 @@ async def end_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
         },
     )
 
-    return {"status": "ended", "conversation_id": conv_id}
+    return {
+        "status": "ended",
+        "conversation_id": conv_id,
+        "target_user_id": conv.target_user_id,
+        "blocked": blocked,
+    }
+
+
+@router.get("/blocklist")
+async def list_blocklist():
+    """拉黑列表（守护进程和 API 共用同一个文件，所以这里看到的就是生效中的名单）。"""
+    from app.services.security.blocklist import blocklist_manager
+
+    return {"items": blocklist_manager.list_blocked()}
+
+
+@router.delete("/blocklist/{user_id}")
+async def remove_from_blocklist(user_id: str):
+    """取消拉黑。"""
+    from app.services.security.blocklist import unblock_user
+
+    if not unblock_user(user_id):
+        raise HTTPException(status_code=404, detail="该用户不在拉黑列表中")
+    return {"status": "unblocked", "user_id": user_id}
 
 
 # ── Intelligence ──────────────────────────────────────
