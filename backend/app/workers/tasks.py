@@ -2,12 +2,14 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from celery import Celery
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.processes import pid_alive
 from app.core.proxy import telegram_proxy
 from app.core.session_paths import SESSION_DIR
 from app.models.models import (
@@ -31,8 +33,12 @@ from app.services.intelligence.pipeline import (
 )
 from app.services.platform.base import AccountCredentials, MessageContent, PlatformName
 from app.services.platform.telegram_adapter import TelegramAdapter
+from app.services.scheduling import compute_next_run, normalize_schedule, parse_iso
 
 logger = logging.getLogger(__name__)
+
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+CHAT_SERVICE_PID_FILE = BACKEND_DIR / "chat_demo.pid"
 
 
 class TaskCancelledError(Exception):
@@ -128,6 +134,23 @@ celery_app.conf.update(
     task_track_started=True,
     worker_max_tasks_per_child=1000,
 )
+
+# Celery Beat 每分钟扫一次数据库里的定时任务（见 scan_task_schedules）
+celery_app.conf.beat_schedule = {
+    "scan-task-schedules": {
+        "task": "app.workers.tasks.scan_task_schedules",
+        "schedule": 60.0,
+    }
+}
+
+
+def _telegram_service_running() -> bool:
+    """常驻在线服务是否在跑（它和任务抢同一个账号的会话文件）。"""
+    try:
+        pid = int(CHAT_SERVICE_PID_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    return pid_alive(pid)
 
 
 async def _run_account_campaign(
@@ -398,6 +421,72 @@ def run_task(self, task_id: str):
         return _run_task_pipeline(task_id)
     except Exception as e:
         raise self.retry(exc=e)
+
+
+@celery_app.task
+def scan_task_schedules():
+    """Celery Beat 每分钟调用：把到点的定时任务派发出去。
+
+    调度配置存在 ``task.config["schedule"]``（见 app/services/scheduling.py）。
+    遇到「上一次还在跑」或「常驻在线服务占用账号」就跳过本轮并顺延，不会硬闯。
+    """
+    db = SessionLocal()
+    try:
+        tasks = (
+            db.execute(select(Task).where(Task.config.op("->>")("schedule").isnot(None)))
+            .scalars()
+            .all()
+        )
+        if not tasks:
+            return
+
+        now = datetime.now(timezone.utc)
+        for task in tasks:
+            config = dict(task.config or {})
+            raw = config.get("schedule") or {}
+            try:
+                schedule = normalize_schedule(raw)
+            except ValueError as e:
+                logger.warning("任务 %s 的定时配置非法，已跳过: %s", task.id, e)
+                continue
+            if schedule is None:
+                continue
+
+            next_run = parse_iso(raw.get("next_run_at"))
+            if next_run is None:
+                schedule["next_run_at"] = compute_next_run(schedule, now).isoformat()
+                task.config = {**config, "schedule": schedule}
+                db.commit()
+                continue
+            if now < next_run:
+                continue
+
+            skip_reason = None
+            if task.status == TaskStatus.RUNNING:
+                skip_reason = "上一次运行还没结束"
+            elif _telegram_service_running():
+                skip_reason = "Telegram 常驻在线服务正在占用账号"
+
+            if skip_reason:
+                schedule["next_run_at"] = compute_next_run(schedule, now).isoformat()
+                schedule["last_skipped_reason"] = skip_reason
+                task.config = {**config, "schedule": schedule}
+                db.commit()
+                logger.info("任务 %s 到点但跳过：%s", task.id, skip_reason)
+                continue
+
+            schedule["last_run_at"] = now.isoformat()
+            schedule["next_run_at"] = compute_next_run(schedule, now).isoformat()
+            schedule["last_skipped_reason"] = None
+            task.config = {**config, "cancel_requested": False, "schedule": schedule}
+            task.status = TaskStatus.RUNNING
+            db.commit()
+            run_task.delay(task_id=str(task.id))
+            logger.info("定时触发任务 %s（%s）", task.id, task.name)
+    except Exception as e:
+        logger.error("扫描定时任务失败: %s", e, exc_info=True)
+    finally:
+        db.close()
 
 
 async def _start_conversation(

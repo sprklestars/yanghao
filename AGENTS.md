@@ -192,11 +192,13 @@ IDLE → VERIFICATION → GREETING → PROBING → EXTRACTION → EXIT
 | 账号管理 →「启动在线服务」 | `persistent_chat_demo.py`（API 拉起，写 `chat_demo.pid`，并把账号名记到 `chat_demo.session`） | 该账号**常驻在线**：监听私聊、按人设自动回复、顺便养号 | 是，独占 |
 | 任务管理 →「启动」 | Celery worker 执行 `run_task`；**没有 worker 时**由 API 进程内直跑 | **一次性外呼**：搜群 → 加群 → 拉成员 → 主动私聊 → 采集情报 | 是，独占 |
 | 任务管理 →「启动调度器」 | `celery -A app.workers.tasks worker`（API 拉起，写 `celery_worker.pid`） | 消费任务队列。缺它时任务退化为 API 进程内直跑，功能一样但不能排队/并发 | 否 |
+| 任务开启定时后自动拉起 | `celery -A app.workers.tasks beat`（写 `celery_beat.pid`，状态文件 `logs/celerybeat-schedule`） | 每分钟跑 `scan_task_schedules`，把到点的定时任务派给 worker | 否 |
 
 - **互斥规则**：同一个 Telegram 账号同一时刻只能有一个客户端（Telegram 侧限制 + 本地 SQLite 单写锁），所以「常驻在线服务」和「外呼任务」不能同时跑。API 现在**双向拦截**并给中文原因：任务启动时若服务在跑 → 400 提示先停止服务；服务启动时若有任务处于 RUNNING → 400 提示先结束任务。
 - 想同时做"在线接客"和"主动外呼"，就用**两个账号**，各挂一个。
 - 「未检测到 Celery worker」不再是错误：`POST /tasks/{id}/start` 会先 ping worker，没有就自动拉起一个，仍不可用才回退进程内直跑，并在响应里返回 `mode: celery|inline`；任务页顶部常显调度器状态和一键启动按钮。
 - 每次外呼跑完会把摘要写进 `task.config["last_run"]`（搜了几个关键词 / 找到、加入多少群 / 起了多少会话），任务页直接显示，避免"完成了却不知道做了什么"。
+- **定时执行**：`PUT /tasks/{id}/schedule` 把 `{enabled, mode: daily|interval, at|every_minutes}` 写进 `task.config["schedule"]` 并算出 `next_run_at`；开启时自动确保 worker + beat 在跑。`scan_task_schedules` 到点派发，遇到「上一次还在跑」或「常驻在线服务占用账号」就跳过并顺延（写 `last_skipped_reason`）。
 
 ## 6. 数据模型与存储
 
@@ -233,7 +235,7 @@ IDLE → VERIFICATION → GREETING → PROBING → EXTRACTION → EXIT
 
 导出：`GET /export/intelligence?format=csv|json|xlsx`、`GET /export/conversations?format=csv|json|xlsx`（`app/api/export.py`）。情报是"每条一行"、对话是"每条消息一行"（聊天日志）；CSV 用 `utf-8-sig` 带 BOM，Excel 用 openpyxl。前端情报页/对话页有导出按钮，走 `downloadExport()`（fetch → blob → 触发保存），错误会显示后端原因而不是跳到错误页。
 
-服务：`GET /services/status`、`POST /services/{platform}/start|stop`、`GET /services/{platform}/logs`（`platform ∈ {telegram, facebook}`，分别对应 `persistent_chat_demo.py` / `persistent_facebook_demo.py`，PID 文件 `chat_demo.pid` / `facebook_demo.pid`，日志在 `logs/`）
+服务：`GET /services/status`、`POST /services/{platform}/start|stop`、`GET /services/{platform}/logs`（`platform ∈ {telegram, facebook, worker, beat}`；tg/fb 对应 `persistent_chat_demo.py` / `persistent_facebook_demo.py`，worker/beat 是 Celery 的消费进程与定时触发器，PID 文件分别是 `chat_demo.pid` / `facebook_demo.pid` / `celery_worker.pid` / `celery_beat.pid`，日志在 `logs/`）
 
 > `start` 支持 `?session=<会话名>` 指定挂载哪个账号（前端会把该平台账号列表里的第一个传进来）：常驻进程一次只跑一个账号，`persistent_chat_demo.py` 通过 `TG_SESSION_NAME` 环境变量接收，默认 `printer`。目录里一个 `.session` 都没有时直接返回 400，而不是傻等一个并不存在的会话。
 
@@ -378,6 +380,8 @@ mypy .
 20. **情报/对话导出**：`app/api/export.py` 提供 `/export/intelligence` 与 `/export/conversations`（`format=csv|json|xlsx`）。情报一条记录一行、对话一条消息一行；Excel 依赖 `openpyxl`（已加进 `pyproject.toml`）。前端情报页右上角三个按钮、对话页历史列表右上角一个下拉，都走 `api.ts` 的 `downloadExport()`（fetch → blob → 触发浏览器保存，失败显示后端原因）。
 
 21. **live-chat 真数据 + 多账号外呼**：① 会话模型加了 `account_name` 属性（`selectinload(Conversation.account)`），`/conversations` 响应带上它，live-chat 页据此做"会话 → 账号"的关联；新增 `POST /conversations/{id}/reply` 人工回复（会话文件不存在/被占用时给出 400/409 的明确提示）。② 任务支持多账号：`task.config["accounts"]` 是账号名数组（兼容单数 `account`），`run_task` 按它**串行**逐个账号跑完「搜群→加群→取目标→私聊」再断开换下一个，跳过多选里不存在或未登录的账号；`last_run.accounts` 记每个账号的分项统计，顶层数字是合计。前端任务表单从单选下拉改成**多选复选框**。
+
+22. **任务定时调度（P2-6）**：调度只存 `task.config["schedule"]`（`enabled` / `mode` / `at` 或 `every_minutes` / `next_run_at` / `last_run_at` / `last_skipped_reason`），**不新增数据表**；纯计算在 `app/services/scheduling.py`（`normalize_schedule` 校验、`compute_next_run` 算下次时间，`daily` 按本机时区解释 HH:MM），有单测。Celery Beat 每分钟跑 `scan_task_schedules`：到点→标记 RUNNING 并 `run_task.delay`；`status==RUNNING` 或常驻在线服务在跑→本轮跳过并顺延。`PUT /tasks/{id}/schedule` 保存配置并自动拉起 worker + beat；前端任务行有「⏰ 定时」编辑器与下次运行时间/上次跳过原因。注意：**beat 必须和 worker 一起跑**，只开 beat 不会执行任务。
 
 ---
 

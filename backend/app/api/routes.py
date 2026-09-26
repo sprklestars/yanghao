@@ -874,6 +874,18 @@ async def _ensure_celery_worker() -> bool:
     return False
 
 
+async def _ensure_celery_beat() -> bool:
+    """没有 Beat 就自动拉起一个——定时任务需要它每分钟触发扫描。"""
+    if _service_running("beat"):
+        return True
+    try:
+        await start_service("beat")
+    except HTTPException as e:
+        logger.warning("自动启动 Celery Beat 失败: %s", e.detail)
+        return False
+    return _service_running("beat")
+
+
 @router.post("/tasks", response_model=TaskResponse)
 async def create_task(body: TaskCreate, db: AsyncSession = Depends(get_db)):
     task = Task(
@@ -1072,6 +1084,64 @@ async def pause_task(task_id: str, db: AsyncSession = Depends(get_db)):
     task.status = TaskStatus.PAUSED
     await db.commit()
     return {"status": "paused", "task_id": str(task_uuid)}
+
+
+@router.put("/tasks/{task_id}/schedule")
+async def set_task_schedule(task_id: str, body: dict, db: AsyncSession = Depends(get_db)):
+    """开启/关闭任务的定时执行。
+
+    body 形如 ``{"enabled": true, "mode": "daily", "at": "09:00"}``
+    或 ``{"enabled": true, "mode": "interval", "every_minutes": 360}``；
+    ``{"enabled": false}`` 表示关闭。
+    """
+    from datetime import datetime, timezone
+
+    from app.services.scheduling import compute_next_run, normalize_schedule
+
+    try:
+        task_uuid = uuid.UUID(str(task_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="任务 ID 格式不正确")
+
+    task = (await db.execute(select(Task).where(Task.id == task_uuid))).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if not body.get("enabled"):
+        config = dict(task.config or {})
+        config.pop("schedule", None)
+        task.config = config
+        await db.commit()
+        return {"status": "disabled", "task_id": str(task_uuid)}
+
+    if task.platform != Platform.TELEGRAM:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{task.platform.value} 的外呼流水线尚未接入，无法设置定时执行",
+        )
+
+    try:
+        schedule = normalize_schedule({**body, "enabled": True})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if schedule is None:  # pragma: no cover - enabled=True 时不会是 None
+        raise HTTPException(status_code=400, detail="调度配置无效")
+
+    schedule["next_run_at"] = compute_next_run(schedule, datetime.now(timezone.utc)).isoformat()
+    schedule["last_skipped_reason"] = None
+    task.config = {**(task.config or {}), "schedule": schedule}
+    await db.commit()
+
+    # 定时执行要靠 worker 干活、Beat 触发，两个都确保在跑
+    worker_ok = await _ensure_celery_worker()
+    beat_ok = await _ensure_celery_beat()
+    return {
+        "status": "enabled",
+        "task_id": str(task_uuid),
+        "schedule": schedule,
+        "worker_running": worker_ok,
+        "beat_running": beat_ok,
+    }
 
 
 @router.get("/tasks", response_model=list[TaskResponse])
@@ -1295,6 +1365,24 @@ SERVICE_MAP = {
             "worker",
             "--loglevel=info",
             "--pool=solo" if os.name == "nt" else "--pool=prefork",
+        ],
+    },
+    # 定时触发器：每分钟扫一次任务表，把到点的任务交给 worker
+    "beat": {
+        "script": "",
+        "pid_file": "celery_beat.pid",
+        "log_file": "logs/celery_beat.log",
+        "label": "定时触发器（Celery Beat）",
+        "command": [
+            "-m",
+            "celery",
+            "-A",
+            "app.workers.tasks",
+            "beat",
+            "--loglevel=info",
+            # beat 的状态文件默认落在仓库根目录，指到 logs/ 里去（已 gitignore）
+            "--schedule",
+            "logs/celerybeat-schedule",
         ],
     },
 }

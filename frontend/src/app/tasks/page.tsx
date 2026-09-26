@@ -31,6 +31,14 @@ export default function TasksPage() {
   const [taskAccounts, setTaskAccounts] = useState<string[]>([]);
   // 目标获取策略：搜群数 / 每群扫描消息数 / 每群私聊人数
   const [strategy, setStrategy] = useState({ search_limit: 5, member_scan: 20, dm_per_group: 5 });
+  // 定时执行编辑
+  const [scheduleTask, setScheduleTask] = useState<Task | null>(null);
+  const [scheduleForm, setScheduleForm] = useState({
+    mode: 'daily',
+    at: '09:00',
+    every_minutes: 360,
+  });
+  const [scheduleSaving, setScheduleSaving] = useState(false);
 
   // Connect WebSocket on mount
   useEffect(() => {
@@ -158,7 +166,53 @@ export default function TasksPage() {
     }
   }
 
+  function openSchedule(task: Task) {
+    const existing = task.config?.schedule;
+    setScheduleForm({
+      mode: existing?.mode === 'interval' ? 'interval' : 'daily',
+      at: existing?.at || '09:00',
+      every_minutes: existing?.every_minutes || 360,
+    });
+    setScheduleTask(task);
+  }
+
+  async function saveSchedule(enabled: boolean) {
+    if (!scheduleTask) return;
+    setScheduleSaving(true);
+    try {
+      const res = await fetchAPI<{ beat_running?: boolean }>(
+        `/tasks/${scheduleTask.id}/schedule`,
+        {
+          method: 'PUT',
+          body: JSON.stringify(
+            enabled
+              ? {
+                  enabled: true,
+                  mode: scheduleForm.mode,
+                  at: scheduleForm.at,
+                  every_minutes: Number(scheduleForm.every_minutes),
+                }
+              : { enabled: false },
+          ),
+        },
+      );
+      await loadTasks();
+      setScheduleTask(null);
+      setNotice({
+        kind: 'ok',
+        text: enabled
+          ? `定时已开启${res?.beat_running === false ? '（但 Beat 没起来，请查看调度器日志）' : ''}`
+          : '定时已关闭',
+      });
+    } catch (e: any) {
+      setNotice({ kind: 'error', text: `设置定时失败：${e?.message || '请检查后端服务'}` });
+    } finally {
+      setScheduleSaving(false);
+    }
+  }
+
   const workerService = services.find((s) => s.platform === 'worker');
+  const beatService = services.find((s) => s.platform === 'beat');
   const telegramService = services.find((s) => s.platform === 'telegram');
   const telegramBusy = !!telegramService?.running;
 
@@ -207,6 +261,13 @@ export default function TasksPage() {
               —— 不启动也能跑任务：后端会在 API 进程内直接执行；启动后任务统一排队、互不阻塞。
             </span>
           )}
+          <span className="mx-2 text-slate-300">|</span>
+          <span className="font-medium text-slate-800">定时触发器（Celery Beat）：</span>
+          {beatService?.running ? (
+            <span className="text-emerald-700">运行中</span>
+          ) : (
+            <span className="text-amber-700">未运行（开启定时后会自动启动）</span>
+          )}
         </div>
         {!workerService?.running && (
           <button
@@ -217,6 +278,74 @@ export default function TasksPage() {
           </button>
         )}
       </div>
+
+      {scheduleTask && (
+        <div className="bg-white border border-slate-200 rounded p-3 mb-4">
+          <div className="text-sm font-medium text-slate-800 mb-2">
+            定时执行：{scheduleTask.name}
+          </div>
+          <div className="flex flex-wrap items-end gap-3 text-sm">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-slate-500">模式</span>
+              <select
+                className="border px-3 py-2 rounded"
+                value={scheduleForm.mode}
+                onChange={(e) => setScheduleForm({ ...scheduleForm, mode: e.target.value })}
+              >
+                <option value="daily">每天固定时间</option>
+                <option value="interval">每隔 N 分钟</option>
+              </select>
+            </label>
+            {scheduleForm.mode === 'daily' ? (
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-slate-500">执行时间（本机时区）</span>
+                <input
+                  type="time"
+                  className="border px-3 py-2 rounded"
+                  value={scheduleForm.at}
+                  onChange={(e) => setScheduleForm({ ...scheduleForm, at: e.target.value })}
+                />
+              </label>
+            ) : (
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-slate-500">间隔（分钟，≥5）</span>
+                <input
+                  type="number"
+                  min={5}
+                  className="border px-3 py-2 rounded w-32"
+                  value={scheduleForm.every_minutes}
+                  onChange={(e) =>
+                    setScheduleForm({ ...scheduleForm, every_minutes: Number(e.target.value) })
+                  }
+                />
+              </label>
+            )}
+            <button
+              onClick={() => saveSchedule(true)}
+              disabled={scheduleSaving}
+              className="bg-slate-900 text-white px-4 py-2 rounded text-sm hover:bg-slate-800 disabled:opacity-50"
+            >
+              {scheduleSaving ? '保存中…' : '保存'}
+            </button>
+            <button
+              onClick={() => saveSchedule(false)}
+              disabled={scheduleSaving}
+              className="border border-rose-200 text-rose-600 px-4 py-2 rounded text-sm hover:bg-rose-50 disabled:opacity-50"
+            >
+              关闭定时
+            </button>
+            <button
+              onClick={() => setScheduleTask(null)}
+              className="border border-slate-200 text-slate-600 px-4 py-2 rounded text-sm hover:bg-slate-50"
+            >
+              取消
+            </button>
+          </div>
+          <p className="text-xs text-slate-500 mt-2">
+            定时触发时会确保 Celery Worker 与 Beat 都在运行；若该账号的常驻在线服务正在跑，本轮会跳过并顺延到下一个周期。
+          </p>
+        </div>
+      )}
 
       {telegramBusy && (
         <div className="bg-amber-50 border-l-4 border-amber-500 p-3 mb-4 rounded">
@@ -377,6 +506,22 @@ export default function TasksPage() {
                     ) : null}
                   </div>
                 ) : null}
+                {t.config?.schedule?.enabled && (
+                  <div className="text-xs text-indigo-600 font-normal mt-0.5">
+                    ⏰{' '}
+                    {t.config.schedule.mode === 'interval'
+                      ? `每 ${t.config.schedule.every_minutes} 分钟`
+                      : `每天 ${t.config.schedule.at}`}
+                    {t.config.schedule.next_run_at
+                      ? ` · 下次 ${new Date(t.config.schedule.next_run_at).toLocaleString('zh-CN', {
+                          hour12: false,
+                        })}`
+                      : ''}
+                    {t.config.schedule.last_skipped_reason
+                      ? ` · 上次跳过：${t.config.schedule.last_skipped_reason}`
+                      : ''}
+                  </div>
+                )}
               </td>
               <td className="px-4 py-2 capitalize">{t.platform === 'telegram' ? '✈️ Telegram' : t.platform}</td>
               <td className="px-4 py-2">
@@ -423,6 +568,12 @@ export default function TasksPage() {
                     ⏹ 取消
                   </button>
                 )}
+                <button
+                  onClick={() => openSchedule(t)}
+                  className="bg-white border border-slate-200 text-slate-600 px-3 py-1 rounded text-xs hover:bg-slate-50"
+                >
+                  ⏰ 定时
+                </button>
                 <button
                   onClick={() => deleteTask(t.id)}
                   className="bg-white border border-rose-200 text-rose-600 px-3 py-1 rounded text-xs hover:bg-rose-50"

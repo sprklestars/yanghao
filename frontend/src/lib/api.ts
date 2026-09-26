@@ -78,6 +78,15 @@ export interface Task {
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | string;
   /** 含 last_run 摘要：searched_keywords / found_groups / joined_groups / conversations */
   config?: {
+    schedule?: {
+      enabled?: boolean;
+      mode?: 'daily' | 'interval' | string;
+      at?: string;
+      every_minutes?: number;
+      next_run_at?: string;
+      last_run_at?: string;
+      last_skipped_reason?: string | null;
+    } | null;
     progress?: {
       stage?: string;
       keyword?: string;
