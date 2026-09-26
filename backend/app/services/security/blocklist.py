@@ -8,12 +8,12 @@
 任何进程改完，另一个进程下一次判断时就能读到。
 """
 
-import json
 import logging
-import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+from app.core.json_store import JsonStore
 
 logger = logging.getLogger(__name__)
 
@@ -26,95 +26,61 @@ class BlockListManager:
 
     def __init__(self, path: Path | str | None = None):
         self._path = Path(path) if path else DEFAULT_PATH
-        self._lock = threading.Lock()
-        self._stamp: tuple[int, int] | None = None
-        self._blocked: dict[str, dict] = {}
-        self._reload(force=True)
+        self._lock = threading.RLock()
+        self._store = JsonStore(self._path)
 
-    # ── 文件读写 ──
-    def _reload(self, force: bool = False) -> None:
-        try:
-            stat = self._path.stat()
-        except OSError:
-            if force or self._blocked:
-                self._blocked = {}
-                self._stamp = None
-            return
+    # ── 文件读写（走 JsonStore：自动重载 + 原子写） ──
+    def _load(self) -> dict[str, dict]:
+        raw = self._store.load()
+        return {str(key): dict(value or {}) for key, value in raw.items()}
 
-        stamp = (stat.st_mtime_ns, stat.st_size)
-        if not force and stamp == self._stamp:
-            return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8") or "{}")
-        except (OSError, ValueError) as e:
-            logger.warning("读取黑名单失败（沿用内存副本）: %s", e)
-            return
-        self._blocked = (
-            {str(key): dict(value or {}) for key, value in raw.items()}
-            if isinstance(raw, dict)
-            else {}
-        )
-        self._stamp = stamp
-
-    def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_name(self._path.name + ".tmp")
-        tmp.write_text(
-            json.dumps(self._blocked, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        os.replace(tmp, self._path)  # 原子替换，避免读到半截文件
-        try:
-            stat = self._path.stat()
-            self._stamp = (stat.st_mtime_ns, stat.st_size)
-        except OSError:
-            self._stamp = None
+    def _save(self, data: dict[str, dict]) -> None:
+        self._store.save(data)
 
     # ── 对外接口 ──
     def block_user(self, user_id: str, reason: str = "") -> bool:
         """拉黑用户；已在名单里返回 False。"""
         with self._lock:
-            self._reload()
-            if user_id in self._blocked:
+            blocked = self._load()
+            if user_id in blocked:
                 return False
-            self._blocked[user_id] = {
+            blocked[user_id] = {
                 "reason": reason,
                 "blocked_at": datetime.now(timezone.utc).isoformat(),
             }
-            self._save()
+            self._save(blocked)
             logger.info("已拉黑用户 %s（%s）", user_id, reason or "未填原因")
             return True
 
     def unblock_user(self, user_id: str) -> bool:
         """取消拉黑；不在名单里返回 False。"""
         with self._lock:
-            self._reload()
-            if user_id not in self._blocked:
+            blocked = self._load()
+            if user_id not in blocked:
                 return False
-            self._blocked.pop(user_id, None)
-            self._save()
+            blocked.pop(user_id, None)
+            self._save(blocked)
             logger.info("已取消拉黑用户 %s", user_id)
             return True
 
     def is_blocked(self, user_id: str) -> bool:
         with self._lock:
-            self._reload()
-            return user_id in self._blocked
+            return user_id in self._load()
 
     def list_blocked(self) -> list[dict]:
         """返回 ``[{user_id, reason, blocked_at}, ...]``（按 user_id 排序）。"""
         with self._lock:
-            self._reload()
-            return [{"user_id": uid, **info} for uid, info in sorted(self._blocked.items())]
+            return [
+                {"user_id": uid, **info} for uid, info in sorted(self._load().items())
+            ]
 
     def get_all_blocked(self) -> set[str]:
         with self._lock:
-            self._reload()
-            return set(self._blocked)
+            return set(self._load())
 
     def clear(self) -> None:
         with self._lock:
-            self._blocked = {}
-            self._save()
+            self._save({})
             logger.info("已清空拉黑列表")
 
 

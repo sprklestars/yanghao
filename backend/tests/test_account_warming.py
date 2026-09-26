@@ -2,7 +2,19 @@
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from app.services.security.account_warming import AccountAge, AccountWarmingManager
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state(tmp_path, monkeypatch):
+    """养号档案默认落在真实的 backend/state/ 下，测试必须隔离，别污染真数据。"""
+    monkeypatch.setattr(
+        "app.services.security.account_warming.DEFAULT_PROFILE_PATH",
+        tmp_path / "warming_profiles.json",
+    )
+
 
 ALL_SETTINGS = {
     "interface_localized": True,

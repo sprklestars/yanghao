@@ -1,9 +1,11 @@
 import asyncio
+import json
 import logging
 import os
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
@@ -12,7 +14,7 @@ from telethon.tl.functions.contacts import AddContactRequest
 from telethon.tl.functions.contacts import SearchRequest as ContactsSearchRequest
 from telethon.tl.types import User
 
-from app.core.session_paths import ensure_session_dir
+from app.core.session_paths import SESSION_DIR, ensure_session_dir
 from app.services.platform.base import (
     AccountCredentials,
     AccountHealthStatus,
@@ -23,8 +25,11 @@ from app.services.platform.base import (
     UserProfile,
 )
 from app.services.security.account_warming import warming_manager
+from app.services.security.rate_limiter import health_monitor, rate_limiter
 
 logger = logging.getLogger(__name__)
+
+PLATFORM_NAME = "telegram"
 
 
 @dataclass
@@ -53,6 +58,113 @@ class TelegramAdapter(PlatformAdapter):
         self._media_groups: dict[str, MediaGroupBuffer] = {}
         self._flush_task: asyncio.Task | None = None
 
+    # ── 限流 / 健康监控 / 养号档案 ──
+    def _account_name(self) -> str:
+        """会话名（sessions/ 下的 id），元数据文件用它命名。"""
+        return self._session_file().replace(os.sep, "/").split("/")[-1].removesuffix(".session")
+
+    async def _rate_limit_ok(self, *actions: str) -> bool:
+        """平台级限流（小时/天滑动窗口）。超限就跳过本次动作。"""
+        allowed, blocked = await rate_limiter.allow(
+            PLATFORM_NAME, list(actions), self._session_name
+        )
+        if not allowed:
+            logger.warning(
+                "[%s] 平台限流命中 %s，本次动作跳过", self._account_name(), blocked
+            )
+            self._record_health(False)
+        return allowed
+
+    def _record_health(self, success: bool) -> None:
+        """记录一次动作结果，并把健康度结论同步到账号元数据（前端徽章据此显示）。"""
+        health_monitor.record_action(self._session_name, success)
+        self._sync_health_to_meta()
+
+    def _ensure_warming_profile(self) -> None:
+        """确保该账号有养号档案，否则数字限额形同虚设（没有档案 = 默认放行）。
+
+        用会话文件 mtime 近似账号注册时间，据此判断 NEW / WARMING / STABLE / MATURE。
+        """
+        created_at = None
+        try:
+            created_at = datetime.fromtimestamp(Path(self._session_file()).stat().st_mtime)
+        except OSError:
+            created_at = None
+        profile = warming_manager.ensure_profile(self._account_name(), created_at=created_at)
+        configured = {
+            "interface_localized": profile.interface_localized,
+            "contacts_sync_disabled": profile.contacts_sync_disabled,
+            "two_factor_enabled": profile.two_factor_enabled,
+            "auto_delete_enabled": profile.auto_delete_enabled,
+            "privacy_settings_complete": profile.privacy_settings_complete,
+        }
+        missing = [name for name, done in configured.items() if not done]
+        meta = self._read_meta()
+        meta.update(
+            {
+                "warming_stage": profile.account_age.name.lower(),
+                "warming_age_days": profile.age_days,
+                "warming_enforce_setup_check": profile.enforce_setup_check,
+                "warming_missing": missing,
+            }
+        )
+        self._write_meta(meta)
+        if profile.enforce_setup_check and profile.account_age.name == "NEW" and missing:
+            logger.warning(
+                "[%s] 新号尚未完成 5 项自检（缺 %s），加群/发消息会被拒绝；"
+                "可用 PATCH /accounts/%s/warming 补齐自检项",
+                self._account_name(),
+                ", ".join(missing),
+                self._account_name(),
+            )
+        elif missing and profile.account_age.name == "NEW":
+            logger.info(
+                "[%s] 新号尚未完成 5 项自检（缺 %s）：当前只套用数字限额，"
+                "需要严格模式可 PATCH /accounts/%s/warming {\"enforce_setup_check\": true}",
+                self._account_name(),
+                ", ".join(missing),
+                self._account_name(),
+            )
+        logger.info(
+            "[%s] 养号阶段 %s（%d 天），今天已加群 %d / 发消息 %d / 陌生人 %d",
+            self._account_name(),
+            profile.account_age.name,
+            profile.age_days,
+            profile.groups_joined_today,
+            profile.messages_sent_today,
+            profile.stranger_messages_today,
+        )
+
+    def _sync_health_to_meta(self) -> None:
+        status = health_monitor.evaluate(self._session_name)
+        meta = self._read_meta()
+        if meta.get("health") == status:
+            return
+        meta["health"] = status
+        self._write_meta(meta)
+        logger.info("[%s] 健康度更新为 %s", self._account_name(), status)
+
+    # ── 账号元数据文件（sessions/<name>_meta.json） ──
+    def _meta_path(self) -> Path:
+        return SESSION_DIR / f"{self._account_name()}_meta.json"
+
+    def _read_meta(self) -> dict:
+        path = self._meta_path()
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) or {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write_meta(self, meta: dict) -> None:
+        path = self._meta_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        except OSError as e:
+            logger.warning("写入账号元数据失败: %s", e)
+
     async def authenticate(self, credentials: AccountCredentials) -> bool:
         # Telethon 构造时就创建 SQLite session 文件，目录不存在会直接抛
         # sqlite3.OperationalError: unable to open database file。
@@ -77,6 +189,7 @@ class TelegramAdapter(PlatformAdapter):
                     logger.error("Session %s is not authorized", self._session_name)
                     return False
             logger.info("Telegram authenticated as %s", credentials.username)
+            self._ensure_warming_profile()
             return True
         except Exception as e:
             logger.error("Telegram auth failed: %s", e)
@@ -144,12 +257,15 @@ class TelegramAdapter(PlatformAdapter):
 
         # Check account warming limits
         allowed, reason = warming_manager.check_and_enforce_limits(
-            account_id=self._session_name,
+            account_id=self._account_name(),
             operation="join_group",
         )
 
         if not allowed:
             logger.warning("Account warming limit: %s", reason)
+            return False
+
+        if not await self._rate_limit_ok("group_joins_per_day"):
             return False
 
         try:
@@ -158,12 +274,13 @@ class TelegramAdapter(PlatformAdapter):
 
             # Record the operation
             warming_manager.record_operation(
-                account_id=self._session_name,
+                account_id=self._account_name(),
                 operation="join_group",
             )
 
             self._daily_actions += 1
             self._total_actions += 1
+            self._record_health(True)
 
             # Add random delay after joining (30-120 seconds as per anti-detection)
             delay = random.uniform(30, 120)
@@ -171,11 +288,13 @@ class TelegramAdapter(PlatformAdapter):
             return True
         except FloodWaitError as e:
             logger.warning("FloodWait %ds on join_group", e.seconds)
+            self._record_health(False)
             await asyncio.sleep(e.seconds)
             return False
         except Exception as e:
             logger.error("join_group error: %s", e)
             self._error_count += 1
+            self._record_health(False)
             return False
 
     async def send_friend_request(self, user_id: str) -> bool:
@@ -183,12 +302,15 @@ class TelegramAdapter(PlatformAdapter):
 
         # Check account warming limits
         allowed, reason = warming_manager.check_and_enforce_limits(
-            account_id=self._session_name,
+            account_id=self._account_name(),
             operation="friend_request",
         )
 
         if not allowed:
             logger.warning("Account warming limit: %s", reason)
+            return False
+
+        if not await self._rate_limit_ok("friend_requests_per_day"):
             return False
 
         try:
@@ -204,23 +326,26 @@ class TelegramAdapter(PlatformAdapter):
 
             # Record the operation
             warming_manager.record_operation(
-                account_id=self._session_name,
+                account_id=self._account_name(),
                 operation="friend_request",
             )
 
             self._daily_actions += 1
             self._total_actions += 1
+            self._record_health(True)
 
             delay = random.uniform(30, 120)
             await asyncio.sleep(delay)
             return True
         except FloodWaitError as e:
             logger.warning("FloodWait %ds on send_friend_request", e.seconds)
+            self._record_health(False)
             await asyncio.sleep(e.seconds)
             return False
         except Exception as e:
             logger.error("send_friend_request error: %s", e)
             self._error_count += 1
+            self._record_health(False)
             return False
 
     async def send_message(self, target_id: str, content: MessageContent) -> bool:
@@ -239,13 +364,17 @@ class TelegramAdapter(PlatformAdapter):
         # Check account warming limits
         is_stranger = content.metadata.get("is_stranger", False) if content.metadata else False
         allowed, reason = warming_manager.check_and_enforce_limits(
-            account_id=self._session_name,
+            account_id=self._account_name(),
             operation="send_message",
             is_stranger=is_stranger,
         )
 
         if not allowed:
             logger.warning("Account warming limit: %s", reason)
+            return False
+
+        # 平台级限流：小时与天两个额度都要通过，才计这一次动作
+        if not await self._rate_limit_ok("messages_per_hour", "messages_per_day"):
             return False
 
         try:
@@ -261,13 +390,14 @@ class TelegramAdapter(PlatformAdapter):
 
             # Record the operation
             warming_manager.record_operation(
-                account_id=self._session_name,
+                account_id=self._account_name(),
                 operation="send_message",
                 is_stranger=is_stranger,
             )
 
             self._daily_actions += 1
             self._total_actions += 1
+            self._record_health(True)
 
             # post-send cooldown
             delay = random.uniform(5, 45)
@@ -275,11 +405,13 @@ class TelegramAdapter(PlatformAdapter):
             return True
         except FloodWaitError as e:
             logger.warning("FloodWait %ds on send_message", e.seconds)
+            self._record_health(False)
             await asyncio.sleep(e.seconds)
             return False
         except Exception as e:
             logger.error("send_message error: %s", e)
             self._error_count += 1
+            self._record_health(False)
             return False
 
     async def _handle_media_group(
@@ -512,15 +644,12 @@ class TelegramAdapter(PlatformAdapter):
         return list(found.values())
 
     def get_health_status(self) -> AccountHealthStatus:
-        error_rate = self._error_count / max(self._total_actions, 1)
-        if error_rate > 0.2:
-            status = "red"
-        elif error_rate > 0.1 or self._daily_actions > 50:
-            status = "yellow"
-        else:
-            status = "green"
+        # 统一用健康监控的判定（它的结论也已同步到账号元数据，前端徽章一致）
+        snapshot = health_monitor.snapshot(self._session_name)
+        total = snapshot["total"] or 0
+        error_rate = (snapshot["errors"] / total) if total else 0.0
         return AccountHealthStatus(
-            status=status,
+            status=snapshot["status"],
             daily_actions=self._daily_actions,
             error_rate=error_rate,
         )

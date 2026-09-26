@@ -228,6 +228,8 @@ IDLE → VERIFICATION → GREETING → PROBING → EXTRACTION → EXIT
 
 账号：`GET /accounts`（扫描会话目录）、`DELETE /accounts/{id}`（删会话文件 + meta）、`PATCH /accounts/{id}`（display_name / health / reply_policy / paused / persona）、`GET /accounts/personas`、`POST /accounts/{id}/check-session`、`POST /accounts/telegram/test-connection`、`POST /accounts/telegram/send-code`、`POST /accounts/telegram/verify-code`、`POST /accounts/facebook/login`、`POST /accounts/facebook/login-complete`、`POST /accounts/zalo/login`
 
+> 养号档案：`GET /accounts/{id}/warming`（阶段 / 今日用量 / 5 项自检 / 当前限额）、`PATCH /accounts/{id}/warming`（改 5 项自检、`enforce_setup_check`、或 `created_at` 纠正账号年龄）。
+
 群组：`POST /groups/search`（支持 AI 关键词扩展）、`POST /groups/join`、`POST /groups/add-by-link`
 
 任务/对话/情报：`POST|GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/start`、`POST /tasks/{id}/cancel`（运行中则立 `cancel_requested` 标记，流水线在下个检查点停；未运行直接置 FAILED + `last_run.error=用户取消`）、`POST /tasks/{id}/pause`（仅未运行的任务；运行中的只能取消）、`DELETE /tasks/{id}`（按依赖顺序删消息 → 会话 → 情报 → 任务；外键没有 ondelete cascade）、`GET /conversations`、`GET /conversations/{id}`、`POST /conversations/{id}/end`（前端「拉黑」按钮走这里：只置 `ended_at` + 状态为 exit + WebSocket 通知，**并不写入 blocklist**）、`GET /intelligence`
@@ -361,7 +363,7 @@ mypy .
 
 11. **架构设计稿里的 MinIO / Nginx / K8s / Prometheus / Celery Beat / 情报图谱均无代码落地**（`architecture-design.md` 属设计意图，不是现状描述）。
 
-12. **有若干模块写好了但没接进主流程**（全仓库搜索无任何 import）：`RateLimiter` / `AccountHealthMonitor`（`security/rate_limiter.py`）、`StrategyEngine`（`conversation/strategy_engine.py`）、`ScriptLibrary`（`conversation/script_library.py`）。目前真正拦截操作的是 `account_warming.warming_manager`，另外打字/冷却延迟是直接写在适配器里的。所以文档里描述的平台级限流、A/B 话术、策略优先级，实际都还没有生效——评估「系统现在能做到什么」时别被文档带跑。
+12. ~~**有若干模块写好了但没接进主流程**~~ 部分 ✅ **已接入**：`RateLimiter` / `AccountHealthMonitor`（`security/rate_limiter.py`）与 `ScriptLibrary`（`conversation/script_library.py`）现在都真的在用了——适配器每次加群/发消息/加好友前先过平台限流（小时+天两个额度"全通过才计数"）、每次成功/失败都记进健康监控并把结论同步到 `sessions/<账号>_meta.json`（前端徽章据此显示）；对话引擎会把话术库里该阶段的话术作为参考注入 prompt，LLM 失败时直接用库里的模板兜底并记录 A/B 使用次数。**仍**未接入的是 `StrategyEngine`（`conversation/strategy_engine.py`，策略优先级）；打字/阅读/冷却延迟仍写在适配器里。评估「系统现在能做到什么」时按这条来。
 
 13. ~~**拉黑链路不完整**~~ ✅ **已打通**：`BlockListManager` 改成 **JSON 文件持久化**（`backend/state/blocklist.json`，已 gitignore），按 `(mtime, size)` 自动重载，所以 API 和守护进程这两个独立进程能看到同一份名单；`POST /conversations/{id}/end` 现在**真的写入黑名单**并返回 `blocked`，守护进程下次收到该用户消息就会跳过。新增 `GET /blocklist`（名单）与 `DELETE /blocklist/{user_id}`（取消拉黑），前端对话页有可展开的黑名单面板。选文件而不是 Redis 的理由：零新依赖、离线可用，而这份名单数据量极小。
      ~~该端点用 `conv.state = "exit"` 赋小写字符串~~ ✅ **已修复**（改用 `ConversationState.EXIT`），同时修掉了同一处 `datetime.now(datetime.timezone.utc)` 这种取不到时区、必然 `AttributeError` 的写法——也就是说这个端点在修复前每次调用都会 500。
@@ -387,6 +389,8 @@ mypy .
 22. **任务定时调度（P2-6）**：调度只存 `task.config["schedule"]`（`enabled` / `mode` / `at` 或 `every_minutes` / `next_run_at` / `last_run_at` / `last_skipped_reason`），**不新增数据表**；纯计算在 `app/services/scheduling.py`（`normalize_schedule` 校验、`compute_next_run` 算下次时间，`daily` 按本机时区解释 HH:MM），有单测。Celery Beat 每分钟跑 `scan_task_schedules`：到点→标记 RUNNING 并 `run_task.delay`；`status==RUNNING` 或常驻在线服务在跑→本轮跳过并顺延。`PUT /tasks/{id}/schedule` 保存配置并自动拉起 worker + beat；前端任务行有「⏰ 定时」编辑器与下次运行时间/上次跳过原因。注意：**beat 必须和 worker 一起跑**，只开 beat 不会执行任务。
 
 23. **情报审核闭环**：`PATCH /intelligence/{id}`（body `{review_status?, operator_notes?}`）改审核状态与备注，枚举校验走 `app/services/intelligence/review.py`（`parse_review_status` / `apply_review`，有单测）。规则：状态回到 `pending` 时清空 `reviewed_at`；其它状态只记**首次**审核时间（审计含义）；`operator_notes` 缺省不改动、传空串则清空。`IntelligenceResponse` 与前端类型加了 `reviewed_at`，导出 CSV/Excel 也带上 `operator_notes` / `reviewed_at`。前端情报页的状态列变成下拉（待审核/已审核/已通过/已拒绝，改动即时保存），新增「操作」列做备注的行内编辑。
+
+24. **风控三件套 + 养号档案接线（P0-3 之后那一项）**：① **平台限流** `RateLimiter.allow(platform, actions, account)` —— 一次动作同时受"每小时/每天"两个额度约束时，**全部通过才计数**（否则会出现小时额度被扣、天额度没通过的错账）；适配器在加群/发消息/加好友前调用，超限就跳过并记一次健康失败。② **健康监控** `health_monitor` 记录每次动作成败，`evaluate()` 的结论（green/yellow/red/black）会写回 `sessions/<账号>_meta.json` 的 `health`，前端徽章和 `check-session` 看到的是同一份数据；连续 5 次失败→black、错误率≥0.2→red、>0.1 或日动作>50→yellow。③ **话术库** `script_library` 在 `engine.py` 里预加载：按 stage+分类+vi 挑一条作为 prompt 里的"参考说法"（要求模型改写而非照抄），LLM 调用失败时直接用该模板兜底并 `record_usage`（A/B 的 effectiveness 会随使用更新）。④ **养号档案**：`AccountWarmingManager` 改用 `backend/state/warming_profiles.json`（与黑名单同一套 `JsonStore`：跨进程可见、重启不丢），适配器鉴权成功后用**会话文件 mtime**近似注册时间自动建档案，数字限额（日加群/发消息/陌生人/好友请求）这才真正生效；档案里的 `enforce_setup_check` 决定是否强制"新号 5 项自检"——**自动创建的档案默认 False**（只套数字限额，避免刚接入就卡死存量账号），显式 `create_profile()` 默认 True，可用 `PATCH /accounts/{id}/warming` 改；同接口还支持 `created_at` 纠正账号年龄。新增 `GET/PATCH /accounts/{id}/warming`。测试隔离：`tests/test_account_warming.py` 用 fixture 把默认路径指到 tmp，避免污染真实 state。
 
 ---
 

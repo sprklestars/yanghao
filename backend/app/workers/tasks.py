@@ -381,6 +381,9 @@ def _run_task_pipeline(task_id: str):
                     summary["warning"] = "未搜到任何群"
                 elif summary["members_found"] == 0:
                     summary["warning"] = "未获取到任何可私聊目标"
+                elif summary["joined_groups"] == 0:
+                    # 搜到群却一个都没加进去：多半被养号限额/新号自检/平台限流拦了
+                    summary["warning"] = "有群但未能加入（可能被养号限额、新号自检或平台限流拦截）"
                 else:
                     summary["warning"] = None
 

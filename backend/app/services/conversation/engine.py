@@ -5,6 +5,10 @@ from openai import AsyncOpenAI
 
 from app.core.config import settings
 from app.models.models import ConversationState
+from app.services.conversation.script_library import (
+    load_default_scripts,
+    select_best_template,
+)
 from app.services.conversation.verification import verification_manager
 
 logger = logging.getLogger(__name__)
@@ -30,6 +34,19 @@ def db_state_for(engine_state: ConvState) -> ConversationState:
 
 def engine_state_from(db_state: ConversationState) -> ConvState:
     return ConvState(db_state.value)
+
+
+# 预加载话术库（A/B 的 effectiveness_score 会随 usage 更新）
+_SCRIPT_LIBRARY = load_default_scripts()
+
+# 状态机 → 话术库的 stage 名（greeting/extraction/pivot/exit 在库里是 category="general"）
+_STAGE_FOR_STATE = {
+    ConvState.GREETING: "greeting",
+    ConvState.PROBING: "probing",
+    ConvState.EXTRACTION: "extraction",
+    ConvState.PIVOT: "pivot",
+    ConvState.EXIT: "exit",
+}
 
 
 SYSTEM_PROMPT_TEMPLATE = """\
@@ -137,6 +154,16 @@ class ConversationEngine:
         if context_summary:
             system_content += f"\n\nPrevious interactions with this user:\n{context_summary}"
 
+        # 话术库：给模型一条该阶段的参考说法（让它改写而不是照抄，保留人设语气）
+        reference = select_best_template(
+            _SCRIPT_LIBRARY, category, _STAGE_FOR_STATE.get(state, ""), "vi"
+        )
+        if reference:
+            system_content += (
+                f"\n\nReference phrasing for this stage (rewrite it in your own words, "
+                f"do not copy verbatim): {reference.text}"
+            )
+
         messages = [{"role": "system", "content": system_content}]
 
         # sliding window: last 20 messages
@@ -155,7 +182,7 @@ class ConversationEngine:
             reply = response.choices[0].message.content or ""
         except Exception as e:
             logger.error("DeepSeek API error: %s", e)
-            reply = self._fallback_reply(state)
+            reply = self._fallback_reply(state, category=category)
 
         new_state = self._transition_state(state, incoming_message, reply, len(history))
         return reply, new_state
@@ -213,7 +240,15 @@ class ConversationEngine:
 
         return current
 
-    def _fallback_reply(self, state: ConvState) -> str:
+    def _fallback_reply(self, state: ConvState, category: str = "general") -> str:
+        # 先用话术库（按 stage + 分类 + 越南语挑一条），没有再退回内置短句
+        template = select_best_template(
+            _SCRIPT_LIBRARY, category, _STAGE_FOR_STATE.get(state, ""), "vi"
+        )
+        if template:
+            _SCRIPT_LIBRARY.record_usage(template.id, success=True)
+            return template.text
+
         fallbacks = {
             ConvState.VERIFICATION: "Vui lòng trả lời câu hỏi xác minh.",
             ConvState.GREETING: "Chào bạn! 😊",

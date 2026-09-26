@@ -325,6 +325,91 @@ async def check_session(account_id: str):
         }
 
 
+def _warming_snapshot(profile) -> dict:
+    """养号档案的可读快照（前端/排障用）。"""
+    return {
+        "account_id": profile.account_id,
+        "stage": profile.account_age.name.lower(),
+        "age_days": profile.age_days,
+        "is_fully_configured": profile.is_fully_configured,
+        "enforce_setup_check": profile.enforce_setup_check,
+        "settings": {
+            "interface_localized": profile.interface_localized,
+            "contacts_sync_disabled": profile.contacts_sync_disabled,
+            "two_factor_enabled": profile.two_factor_enabled,
+            "auto_delete_enabled": profile.auto_delete_enabled,
+            "privacy_settings_complete": profile.privacy_settings_complete,
+        },
+        "today": {
+            "groups_joined": profile.groups_joined_today,
+            "messages_sent": profile.messages_sent_today,
+            "stranger_messages": profile.stranger_messages_today,
+            "friend_requests": profile.friend_requests_today,
+        },
+        "limits": {
+            "groups_per_day": profile.config.max_groups_per_day,
+            "messages_per_hour": profile.config.max_messages_per_hour,
+            "messages_per_day": profile.config.max_messages_per_day,
+            "stranger_messages_per_day": profile.config.max_stranger_messages_per_day,
+            "friend_requests_per_day": profile.config.max_friend_requests_per_day,
+        },
+    }
+
+
+@router.get("/accounts/{account_id}/warming")
+async def get_account_warming(account_id: str):
+    """查看账号养号档案（阶段 / 今日用量 / 5 项自检）。"""
+    from app.services.security.account_warming import warming_manager
+
+    profile = warming_manager.get_profile(account_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=404, detail="该账号还没有养号档案（账号完成一次认证后会自动创建）"
+        )
+    return _warming_snapshot(profile)
+
+
+@router.patch("/accounts/{account_id}/warming")
+async def update_account_warming(account_id: str, body: dict):
+    """更新 5 项自检开关，或用 enforce_setup_check 关闭"新号必须完成自检"的强制要求。"""
+    from app.services.security.account_warming import warming_manager
+
+    profile = warming_manager.get_profile(account_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=404, detail="该账号还没有养号档案（账号完成一次认证后会自动创建）"
+        )
+
+    allowed = {
+        "interface_localized",
+        "contacts_sync_disabled",
+        "two_factor_enabled",
+        "auto_delete_enabled",
+        "privacy_settings_complete",
+        "enforce_setup_check",
+    }
+    updates = {key: bool(value) for key, value in body.items() if key in allowed}
+    created_at_raw = body.get("created_at")
+    parsed_created_at = None
+    if created_at_raw:
+        from datetime import datetime as _dt
+
+        try:
+            parsed_created_at = _dt.fromisoformat(str(created_at_raw).replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="created_at 需为 ISO 时间，如 2026-08-01")
+    if not updates:
+        if parsed_created_at is None:
+            options = ", ".join(sorted(allowed))
+            raise HTTPException(
+                status_code=400,
+                detail=f"没有可更新的字段（可选：{options}、created_at）",
+            )
+    warming_manager.update_settings(account_id, **updates, created_at=parsed_created_at)
+    updated = warming_manager.get_profile(account_id)
+    return _warming_snapshot(updated)
+
+
 # ── Account Login Flow ─────────────────────────────────
 
 _pending_logins: dict[str, dict] = {}

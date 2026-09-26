@@ -34,7 +34,8 @@ class RateLimiter:
         self._redis = redis_client
         self._local_counters: dict[str, list[float]] = {}
 
-    async def check_and_consume(self, platform: str, action: str, account_id: str) -> bool:
+    async def _peek(self, platform: str, action: str, account_id: str) -> bool:
+        """只看是否超限，不计数。"""
         key = f"{platform}:{account_id}:{action}"
         now = time.time()
 
@@ -44,31 +45,56 @@ class RateLimiter:
 
         limit = limits[action]
 
-        # local fallback when Redis is unavailable
         if self._redis is None:
             timestamps = self._local_counters.get(key, [])
             window_start = now - 3600 if "hour" in action else now - 86400
             timestamps = [t for t in timestamps if t > window_start]
-            if len(timestamps) >= limit:
-                return False
-            timestamps.append(now)
-            self._local_counters[key] = timestamps
-            return True
+            self._local_counters[key] = timestamps  # 顺手清理过期窗口
+            return len(timestamps) < limit
 
-        # Redis sliding window
         window = 3600 if "hour" in action else 86400
         pipe = self._redis.pipeline()
         pipe.zremrangebyscore(key, 0, now - window)
         pipe.zcard(key)
         results = await pipe.execute()
-        current_count = results[1]
+        return results[1] < limit
 
-        if current_count >= limit:
-            return False
+    async def _consume(self, platform: str, action: str, account_id: str) -> None:
+        """记一次动作。"""
+        if action not in self.LIMITS.get(platform, {}):
+            return
+        key = f"{platform}:{account_id}:{action}"
+        now = time.time()
 
+        if self._redis is None:
+            self._local_counters.setdefault(key, []).append(now)
+            return
+
+        window = 3600 if "hour" in action else 86400
         await self._redis.zadd(key, {str(now): now})
         await self._redis.expire(key, window + 60)
+
+    async def check_and_consume(self, platform: str, action: str, account_id: str) -> bool:
+        """检查并计数单个动作（保留原接口）。"""
+        if not await self._peek(platform, action, account_id):
+            return False
+        await self._consume(platform, action, account_id)
         return True
+
+    async def allow(
+        self, platform: str, actions: list[str], account_id: str
+    ) -> tuple[bool, str]:
+        """一次动作同时受多个限额约束时的正确用法：**全部通过才计数**。
+
+        否则会出现"小时额度被扣了、天额度却没通过"的错账。
+        返回 ``(是否允许, 触发的限额名)``。
+        """
+        for action in actions:
+            if not await self._peek(platform, action, account_id):
+                return False, action
+        for action in actions:
+            await self._consume(platform, action, account_id)
+        return True, ""
 
     async def simulate_typing_delay(self, text: str) -> None:
         chars = len(text)
@@ -139,3 +165,21 @@ class AccountHealthMonitor:
         if error_rate > 0.1 or daily > self.THRESHOLDS["daily_messages_max"]:
             return "yellow"
         return "green"
+
+    def snapshot(self, account_id: str) -> dict:
+        """给接口/日志用的健康快照。"""
+        stats = self._stats.get(account_id) or {
+            "total": 0,
+            "errors": 0,
+            "consecutive_failures": 0,
+            "daily_count": 0,
+        }
+        return {**stats, "status": self.evaluate(account_id)}
+
+    def reset(self, account_id: str) -> None:
+        self._stats.pop(account_id, None)
+
+
+# 全局单例（以前只有类定义、没有任何地方实例化，所以限流和健康监控从未生效）
+rate_limiter = RateLimiter()
+health_monitor = AccountHealthMonitor()
