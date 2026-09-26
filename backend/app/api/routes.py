@@ -16,6 +16,7 @@ from app.core.database import get_db
 from app.core.processes import pid_alive
 from app.core.proxy import telegram_proxy
 from app.core.session_paths import (
+    PLATFORM_SESSION_SUFFIX,
     SESSION_DIR,
     ensure_session_dir,
     is_valid_session_name,
@@ -1020,32 +1021,34 @@ async def start_task(task_id: str, db: AsyncSession = Depends(get_db)):
     if task.status == TaskStatus.RUNNING:
         raise HTTPException(status_code=400, detail="任务已在运行中")
 
-    # 三平台一致：只有 Telegram 的外呼流水线真的实现了，别让 Facebook/Zalo 的任务
-    # 点下去静默变成"暂停"（那是以前最难排查的一种"没反应"）
-    if task.platform != Platform.TELEGRAM:
+    # 三平台都支持外呼，但必须先有对应平台的登录态文件
+    suffix = PLATFORM_SESSION_SUFFIX[task.platform.value]
+    session_files = sorted(SESSION_DIR.glob(f"*{suffix}"))
+    if not session_files:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"{task.platform.value} 的外呼任务流水线尚未接入（当前只有 Telegram 支持），"
-                "该任务无法启动"
+                f"还没有 {task.platform.value} 的账号登录态（sessions/*{suffix}），"
+                "请先在「账号管理」里添加并完成登录"
             ),
         )
 
-    # 常驻服务（persistent_chat_demo.py）和任务流水线用的是同一个 .session 文件，
-    # Telegram 同一账号不能同时开两个客户端：抢同一份 SQLite 会 "database is locked"。
-    if task.platform.value == "telegram":
-        info = SERVICE_MAP["telegram"]
-        if _is_running(_read_pid(BACKEND_DIR / info["pid_file"])):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Telegram 常驻服务正在运行，它占用了同一个账号的会话文件。"
-                    "请先到「账号管理」页点「停止」，再启动任务。"
-                ),
-            )
-        busy = next(
-            (p.stem for p in sorted(SESSION_DIR.glob("*.session")) if session_in_use(p)), None
+    # 常驻在线服务和任务流水线用同一份登录态，不能同时跑
+    service_platform = task.platform.value if task.platform.value in SERVICE_MAP else None
+    if service_platform and _is_running(
+        _read_pid(BACKEND_DIR / SERVICE_MAP[service_platform]["pid_file"])
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{task.platform.value} 常驻在线服务正在运行，它占用了同一份登录态。"
+                "请先到「账号管理」页点「停止」，再启动任务。"
+            ),
         )
+
+    # Telegram 的 .session 是 SQLite，还被别的进程占着时会 database is locked
+    if task.platform == Platform.TELEGRAM:
+        busy = next((p.stem for p in session_files if session_in_use(p)), None)
         if busy:
             raise HTTPException(
                 status_code=400,
@@ -1199,10 +1202,14 @@ async def set_task_schedule(task_id: str, body: dict, db: AsyncSession = Depends
         await db.commit()
         return {"status": "disabled", "task_id": str(task_uuid)}
 
-    if task.platform != Platform.TELEGRAM:
+    suffix = PLATFORM_SESSION_SUFFIX[task.platform.value]
+    if not any(SESSION_DIR.glob(f"*{suffix}")):
         raise HTTPException(
             status_code=400,
-            detail=f"{task.platform.value} 的外呼流水线尚未接入，无法设置定时执行",
+            detail=(
+                f"还没有 {task.platform.value} 的账号登录态（sessions/*{suffix}），"
+                "请先在「账号管理」里添加并完成登录，再设置定时执行"
+            ),
         )
 
     try:

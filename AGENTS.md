@@ -107,7 +107,7 @@ docker-compose.yml
  → EXTRACTION/EXIT 阶段触发情报提取入库
 ```
 
-注意：`run_task` 里只有 Telegram 分支是实现的，其他平台直接置为 `PAUSED`。（早期文档里的 FB/Zalo「代码就绪待实测」指适配器已写好，但任务流水线未接入。）
+三个平台现在**走同一条流水线**（`run_task` 里已无平台分支）：账号从 `sessions/` 的登录态文件取（TG `.session` / FB `_cookies.json` / Zalo `_zalo.json`），依次「搜群 → 加群 → 取目标 → 私聊」，多账号串行。各平台适配器能力不同：**Facebook** 是真实的 Playwright 浏览器自动化（选择器会随 FB 改版失效）；**Zalo** 的非官方接口不支持群搜索，`search_groups` 只能列出账号已加入的群，加群通常需要邀请链接。平台级限流对 FB/Zalo 在流水线里统一施加（Telegram 由适配器内部处理，避免重复计数）。
 
 > 选账号的顺序：先查 DB 的 `accounts` 表（`is_active`），**表里没有就取 `sessions/` 目录里第一个 `.session` 并在 `accounts` 表补登记一条**（会话表 `conversations.account_id` 是外键，没有这行没法落库）——账号列表本来就是扫这个目录的，两边以前对不上，会出现「界面上有账号、任务却报找不到可用账号直接 FAILED」。选定的账号再按 `sessions/<username>.session` 找会话文件，找到就直接用它登录（不需要手机号/验证码），找不到才退回 `osint_<account.id>`。所有 `TelegramAdapter` 都带上 `TG_PROXY_URL`，否则 Telegram 握手会失败。
 
@@ -397,6 +397,8 @@ mypy .
 ---
 
 25. **API 鉴权 + 路由层集成测试（第 5 项）**：新增 `API_TOKEN` 配置（`.env`，默认空=不鉴权，启动时会打一条"未开鉴权、别暴露到公网"的告警）。非空时 `/api/v1/*` 必须带 `Authorization: Bearer <token>` 或 `X-API-Token`，`/ws` 必须带 `?token=`（HTTP 中间件在 `main.py`，WS 在握手处校验，不通过直接 close 1008）；`/health` 与 CORS 预检始终放行。401 响应**手工补了跨域头**（否则浏览器只报"后端不可达"），前端 `fetchAPI`/`downloadExport` 会带 `NEXT_PUBLIC_API_TOKEN`，守护进程的 `WS_URL` 也会自动带 token。新增 `tests/test_api_auth.py`：这是仓库里第一批**接口层**测试（用 `TestClient`，导入前塞假 DSN 以免没 .env 的环境在收集阶段炸），覆盖鉴权关闭/开启、Bearer 与 X-API-Token、401 的跨域头、预检放行，以及 `/services/status` 的真实响应形状。
+
+26. **FB/Zalo 外呼流水线接入（最后一项）**：`run_task` 去掉平台分支，三个平台共用「搜群→加群→取目标→私聊」；账号按 `config.accounts` 指定或自动挑第一个登录态文件（`sessions/*.session` / `*_cookies.json` / `*_zalo.json`，命名约定集中在 `app/core/session_paths.py` 的 `PLATFORM_SESSION_SUFFIX` / `platform_session_path` / `platform_session_name`）。适配器构造在 `_build_adapter()`：Telegram 用 `TG_PROXY_URL` 代理，Facebook 把同一个代理传给 Playwright（`credentials["proxy"]`），Zalo 从 `_zalo.json` 里读 `phone`/`imei`（zlapi 即使复用 cookie 也要 phone）。`POST /tasks/{id}/start` 与定时开关现在三平台都放行，但**要求该平台已有登录态文件**（否则 400 说明缺哪种文件）；常驻服务占用同一份登录态时也会被拦。FB/Zalo 的平台限流在 `_run_account_campaign` 里统一施加（Telegram 由适配器内部处理，避免重复计数）。`last_run` 新增 `platform` 与 `blocked_by_limit`。**能力差异**：FB 是真实 Playwright 自动化（选择器随改版可能失效）；Zalo 非官方接口不支持群搜索，只能列已加入的群，加群多需邀请链接。测试：`tests/test_task_pipeline_platforms.py` 用替身适配器跑完整流水线（无数据库环境自动跳过）。**已知缺口**：适配器调用没有超时保护——实测遇到 Telegram 连接被服务器重置时，solo 池的 worker 会卡在那次任务里不再应答（重启 worker 即可恢复），后续应给适配器调用加 `asyncio.wait_for`。
 
 ## 12. 文档索引（均在仓库根目录）
 

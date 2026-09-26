@@ -6,10 +6,16 @@
 
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost:5432/test")
-os.environ.setdefault("DATABASE_URL_SYNC", "postgresql://test:test@localhost:5432/test")
+# 只有在本机没有 .env（例如 CI）时才塞假 DSN，避免影响其它依赖真实数据库的用例；
+# 这一步必须在导入 app.main 之前完成。
+if not (Path(__file__).resolve().parents[1] / ".env").exists():
+    os.environ.setdefault(
+        "DATABASE_URL", "postgresql+asyncpg://test:test@localhost:5432/test"
+    )
+    os.environ.setdefault("DATABASE_URL_SYNC", "postgresql://test:test@localhost:5432/test")
 
 from fastapi.testclient import TestClient  # noqa: E402
 

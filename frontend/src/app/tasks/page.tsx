@@ -214,7 +214,11 @@ export default function TasksPage() {
   const workerService = services.find((s) => s.platform === 'worker');
   const beatService = services.find((s) => s.platform === 'beat');
   const telegramService = services.find((s) => s.platform === 'telegram');
+  const facebookService = services.find((s) => s.platform === 'facebook');
   const telegramBusy = !!telegramService?.running;
+  const facebookBusy = !!facebookService?.running;
+  const platformBusy = (platform: string) =>
+    platform === 'telegram' ? telegramBusy : platform === 'facebook' ? facebookBusy : false;
 
   return (
     <div>
@@ -347,13 +351,13 @@ export default function TasksPage() {
         </div>
       )}
 
-      {telegramBusy && (
+      {(telegramBusy || facebookBusy) && (
         <div className="bg-amber-50 border-l-4 border-amber-500 p-3 mb-4 rounded">
           <p className="text-sm text-amber-800">
-            ⚠️ Telegram 常驻在线服务正在运行，占用账号
-            {telegramService?.session ? ` @${telegramService.session}` : ''}
-            （监听私聊并自动回复）。<strong>外呼任务和它是互斥的</strong>：同一个账号同一时刻只能有一个
-            Telegram 客户端。想跑任务请先到「账号管理」页点「停止」。
+            ⚠️ {telegramBusy ? 'Telegram' : 'Facebook'} 常驻在线服务正在运行
+            {telegramBusy && telegramService?.session ? `，占用账号 @${telegramService.session}` : ''}
+            （监听私聊并自动回复）。<strong>外呼任务和它是互斥的</strong>：同一份登录态同一时刻只能被一个
+            客户端使用。想跑任务请先到「账号管理」页点「停止」。
           </p>
         </div>
       )}
@@ -444,18 +448,18 @@ export default function TasksPage() {
             </label>
           ))}
         </div>
-        {form.platform !== 'telegram' ? (
-          <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 leading-relaxed">
-            提示：Facebook / Zalo 的外呼流水线尚未接入，这类任务可以创建但<strong>无法启动</strong>
-            （目前只有 Telegram 支持搜群、加群、私聊）。
-          </p>
-        ) : (
-          <p className="text-xs text-slate-500 leading-relaxed">
-            外呼会真的搜群、加群，并私聊群里的活跃用户；Telegram 不允许普通账号拉成员列表，
-            所以程序会扫描群内最近发言来找带用户名的目标。任务运行时该账号会被独占，
-            请先停止它的「常驻在线服务」。
-          </p>
-        )}
+        <p className="text-xs text-slate-500 leading-relaxed">
+          {form.platform === 'telegram' &&
+            '外呼会真的搜群、加群，并私聊群里的活跃用户；Telegram 不允许普通账号拉成员列表，' +
+              '所以程序会扫描群内最近发言来找带用户名的目标。任务运行时该账号会被独占，' +
+              '请先停止它的「常驻在线服务」。'}
+          {form.platform === 'facebook' &&
+            'Facebook 走浏览器自动化（Playwright）：要先用「账号管理」里的可见浏览器完成登录拿到 cookie；' +
+              '页面选择器会随 FB 改版失效，跑不动时先看服务日志。加群/私聊会走平台的日限额。'}
+          {form.platform === 'zalo' &&
+            'Zalo 的非官方接口不支持群搜索，只能对已加入的群或已有会话发消息，加群通常需要邀请链接；' +
+              '因此这类任务的"搜群"结果取决于账号已加入的群。'}
+        </p>
         <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
           创建任务
         </button>
@@ -547,13 +551,11 @@ export default function TasksPage() {
                 {(t.status === 'pending' || t.status === 'paused') && (
                   <button
                     onClick={() => startTask(t.id)}
-                    disabled={(telegramBusy && t.platform === 'telegram') || t.platform !== 'telegram'}
+                    disabled={platformBusy(t.platform)}
                     title={
-                      t.platform !== 'telegram'
-                        ? '该平台的外呼流水线尚未接入，无法启动'
-                        : telegramBusy
-                          ? '常驻在线服务正在占用这个账号，请先停止服务'
-                          : '启动任务：搜群 → 加群 → 取目标 → 主动私聊'
+                      platformBusy(t.platform)
+                        ? '该平台的常驻在线服务正在占用登录态，请先停止服务'
+                        : '启动任务：搜群 → 加群 → 取目标 → 主动私聊'
                     }
                     className="bg-green-600 text-white px-3 py-1 rounded text-xs hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
                   >

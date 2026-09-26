@@ -6,6 +6,7 @@ Telethon 在 **构造 TelegramClient 的那一瞬间** 就会创建 SQLite 会�
 """
 
 import re
+from enum import Enum
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -20,6 +21,30 @@ _SESSION_NAME_RE = re.compile(rf"^{SESSION_NAME_PATTERN}$")
 def is_valid_session_name(name: str) -> bool:
     """会话名是否合法：1-48 位小写字母/数字/下划线/短横线，且不能以符号开头。"""
     return bool(_SESSION_NAME_RE.fullmatch(name or ""))
+
+
+# 各平台"登录态文件"的命名约定（sessions/ 目录就是账号真源）
+PLATFORM_SESSION_SUFFIX: dict[str, str] = {
+    "telegram": ".session",
+    "facebook": "_cookies.json",
+    "zalo": "_zalo.json",
+}
+
+
+def _platform_key(platform) -> str:
+    """平台名归一化：传枚举或字符串都行。"""
+    return platform.value if isinstance(platform, Enum) else str(platform)
+
+
+def platform_session_path(platform, name: str) -> Path:
+    return SESSION_DIR / f"{name}{PLATFORM_SESSION_SUFFIX[_platform_key(platform)]}"
+
+
+def platform_session_name(platform, path: Path | str) -> str:
+    """从登录态文件路径反推账号名。"""
+    path = Path(path)
+    suffix = PLATFORM_SESSION_SUFFIX[_platform_key(platform)]
+    return path.name[: -len(suffix)] if path.name.endswith(suffix) else path.stem
 
 
 def ensure_session_dir(session_path: str | Path | None = None) -> Path:
