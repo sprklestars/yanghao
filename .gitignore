@@ -10,8 +10,10 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# 注意：必须是 /lib/ 这种锚定到仓库根的写法。
+# 原来的 "lib/" 会连 frontend/src/lib/ 一起忽略，导致前端 API 客户端从未被提交。
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -58,6 +60,9 @@ secrets/
 *.log
 logs/
 
+# 运行时共享状态（黑名单等，跨进程用）
+state/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -66,10 +71,12 @@ desktop.ini
 # Playwright
 .playwright/
 
-# Node modules (frontend)
-frontend/node_modules/
+# Node modules（任意层级：根目录、frontend 或以后新增的子项目都覆盖）
+node_modules/
 frontend/.next/
 frontend/out/
+# TypeScript 增量编译缓存（tsc --noEmit / next build 会生成）
+*.tsbuildinfo
 
 # Backend build
 backend/build/

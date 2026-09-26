@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
-from getpass import getpass
-from pathlib import Path
 import re
 import sys
+from getpass import getpass
+from pathlib import Path
 
 from telethon import TelegramClient
 
 from app.core.config import Settings
+from app.core.proxy import telegram_proxy
 
 BACKEND_DIR = Path(__file__).resolve().parent
 SESSION_DIR = BACKEND_DIR / "sessions"
@@ -23,7 +24,10 @@ def session_name(value: str) -> str:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="逐个登录Telegram账号，每个名称保存独立会话")
     parser.add_argument(
-        "sessions", nargs="*", type=session_name, default=["printer"],
+        "sessions",
+        nargs="*",
+        type=session_name,
+        default=["printer"],
         help="例如 test1 test2 test3；不指定时使用 printer",
     )
     args = parser.parse_args(argv)
@@ -39,7 +43,7 @@ async def login_account(name: str, settings: Settings) -> bool:
         str(SESSION_DIR / name),
         settings.tg_api_id,
         settings.tg_api_hash,
-        proxy=("http", "127.0.0.1", 7890),
+        proxy=telegram_proxy(),
         timeout=10,
         connection_retries=2,
     )
@@ -79,7 +83,10 @@ async def main(names: list[str]) -> int:
             print("终端输入已关闭，停止登录；已保存的会话保留。")
             return 1
         except Exception as exc:
-            print(f"[{name}] 登录失败（{type(exc).__name__}）；会话文件保留，不自动切换代理或删除会话。")
+            print(
+                f"[{name}] 登录失败（{type(exc).__name__}）；"
+                "会话文件保留，不自动切换代理或删除会话。"
+            )
             print("请检查代理、登录信息，以及是否有其他进程占用会话。")
     print(f"\n认证成功 {succeeded}/{len(names)} 个会话；本命令只登录，不启动自动回复。")
     return 0 if succeeded == len(names) else 1

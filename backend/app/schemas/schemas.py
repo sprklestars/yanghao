@@ -12,8 +12,8 @@ from app.models.models import (
     TaskStatus,
 )
 
-
 # ── Task Schemas ──────────────────────────────────────
+
 
 class TaskCreate(BaseModel):
     name: str = Field(min_length=1, max_length=300)
@@ -32,6 +32,9 @@ class TaskResponse(BaseModel):
     keywords: list[str]
     target_region: str | None
     status: TaskStatus
+    # 最近一次运行的摘要（搜了几个关键词、找到/加入多少群、起了几个会话），
+    # 前端用它回答"任务跑完了到底做了什么"
+    config: dict = {}
     created_at: datetime
     updated_at: datetime
 
@@ -39,6 +42,7 @@ class TaskResponse(BaseModel):
 
 
 # ── Conversation Schemas ──────────────────────────────
+
 
 class MessageResponse(BaseModel):
     id: uuid.UUID
@@ -53,6 +57,7 @@ class MessageResponse(BaseModel):
 class ConversationResponse(BaseModel):
     id: uuid.UUID
     account_id: uuid.UUID
+    account_name: str | None = None
     task_id: uuid.UUID
     target_user_id: str
     target_display_name: str | None
@@ -66,6 +71,7 @@ class ConversationResponse(BaseModel):
 
 
 # ── Intelligence Schemas ──────────────────────────────
+
 
 class IntelligenceResponse(BaseModel):
     id: uuid.UUID
@@ -83,7 +89,9 @@ class IntelligenceResponse(BaseModel):
     last_seen: datetime | None
     response_rate: float | None
     review_status: ReviewStatus
+    platforms: list[str] | None = None
     operator_notes: str | None
+    reviewed_at: datetime | None = None
     collected_at: datetime
 
     model_config = {"from_attributes": True}

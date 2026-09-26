@@ -3,29 +3,27 @@ OSINT Platform - Demo Data Seeder
 生成演示数据用于展示系统功能
 """
 
-import asyncio
 import uuid
-from datetime import datetime, timezone, timedelta
-import random
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.models.models import (
     Account,
+    AccountHealth,
+    ActivityStatus,
     Conversation,
     ConversationState,
+    IntelligenceCategory,
     IntelligenceRecord,
     Message,
     MessageDirection,
     Persona,
     Platform,
+    ReviewStatus,
     Task,
     TaskStatus,
-    IntelligenceCategory,
-    ActivityStatus,
-    ReviewStatus,
-    AccountHealth,
 )
 
 
@@ -33,10 +31,15 @@ def create_demo_data():
     """创建演示数据"""
 
     # 使用同步引擎
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from app.core.config import settings
-    engine = create_engine(settings.database_url_sync or "postgresql://osint:osint@localhost:5432/osint")
+
+    engine = create_engine(
+        settings.database_url_sync or "postgresql://osint:osint@localhost:5432/osint"
+    )
 
     with Session(engine) as db:
         print("🌱 开始生成演示数据...")
@@ -52,15 +55,18 @@ def create_demo_data():
                     "age": 28,
                     "location": "Ho Chi Minh City",
                     "occupation": "Freelance graphic designer",
-                    "backstory": "在胡志明市做自由设计师3年,经常需要换汇和找外包合作。擅长网页设计和品牌标识。",
+                    "backstory": (
+                        "在胡志明市做自由设计师3年,经常需要换汇和找外包合作。"
+                        "擅长网页设计和品牌标识。"
+                    ),
                     "language": "vi",
                     "tone": "casual, friendly, slightly naive",
                     "conversation_style": {
                         "avg_message_length": "15-40 words",
                         "uses_emoji": True,
-                        "response_time_pattern": "30s-3min"
-                    }
-                }
+                        "response_time_pattern": "30s-3min",
+                    },
+                },
             ),
             Persona(
                 id=uuid.uuid4(),
@@ -70,16 +76,18 @@ def create_demo_data():
                     "age": 35,
                     "location": "Hanoi",
                     "occupation": "Small business owner",
-                    "backstory": "在河内经营一家小商店,需要做跨境支付和货币兑换。经常寻找可靠的换汇渠道。",
+                    "backstory": (
+                        "在河内经营一家小商店,需要做跨境支付和货币兑换。经常寻找可靠的换汇渠道。"
+                    ),
                     "language": "vi",
                     "tone": "business-like but friendly",
                     "conversation_style": {
                         "avg_message_length": "20-50 words",
                         "uses_emoji": False,
-                        "response_time_pattern": "1-5min"
-                    }
-                }
-            )
+                        "response_time_pattern": "1-5min",
+                    },
+                },
+            ),
         ]
         db.add_all(personas)
         db.commit()
@@ -97,7 +105,7 @@ def create_demo_data():
                 health=AccountHealth.GREEN,
                 proxy_url="socks5://demo-proxy:1080",
                 is_active=True,
-                last_action_at=datetime.now(timezone.utc) - timedelta(hours=2)
+                last_action_at=datetime.now(timezone.utc) - timedelta(hours=2),
             ),
             Account(
                 id=uuid.uuid4(),
@@ -108,8 +116,8 @@ def create_demo_data():
                 health=AccountHealth.GREEN,
                 proxy_url="socks5://demo-proxy:1081",
                 is_active=True,
-                last_action_at=datetime.now(timezone.utc) - timedelta(hours=5)
-            )
+                last_action_at=datetime.now(timezone.utc) - timedelta(hours=5),
+            ),
         ]
         db.add_all(accounts)
         db.commit()
@@ -126,7 +134,7 @@ def create_demo_data():
                 keywords=["thiết kế website", "lập trình viên", "freelancer"],
                 target_region="Hanoi",
                 status=TaskStatus.COMPLETED,
-                config={"max_groups": 5, "max_members_per_group": 20}
+                config={"max_groups": 5, "max_members_per_group": 20},
             ),
             Task(
                 id=uuid.uuid4(),
@@ -136,7 +144,7 @@ def create_demo_data():
                 keywords=["đổi tiền", "chuyển tiền", "tỷ giá"],
                 target_region="Ho Chi Minh City",
                 status=TaskStatus.RUNNING,
-                config={"max_groups": 3, "max_members_per_group": 15}
+                config={"max_groups": 3, "max_members_per_group": 15},
             ),
             Task(
                 id=uuid.uuid4(),
@@ -146,8 +154,8 @@ def create_demo_data():
                 keywords=["thám tử", "điều tra", "theo dõi"],
                 target_region=None,
                 status=TaskStatus.PENDING,
-                config={}
-            )
+                config={},
+            ),
         ]
         db.add_all(tasks)
         db.commit()
@@ -170,7 +178,7 @@ def create_demo_data():
             turn_count=6,
             context_summary="目标是一名网站开发者,提供WordPress建站服务,报价$300-500",
             started_at=datetime.now(timezone.utc) - timedelta(days=2, hours=3),
-            ended_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2)
+            ended_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2),
         )
         conversations.append(conv1)
 
@@ -180,49 +188,66 @@ def create_demo_data():
                 id=uuid.uuid4(),
                 conversation_id=conv1_id,
                 direction=MessageDirection.OUTBOUND,
-                content="Chào bạn! Mình thấy bạn trong nhóm Freelancer Vietnam. Bạn làm thiết kế web hả? 😊",
+                content=(
+                    "Chào bạn! Mình thấy bạn trong nhóm Freelancer Vietnam. "
+                    "Bạn làm thiết kế web hả? 😊"
+                ),
                 language="vi",
-                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=3)
+                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=3),
             ),
             Message(
                 id=uuid.uuid4(),
                 conversation_id=conv1_id,
                 direction=MessageDirection.INBOUND,
-                content="Chào bạn! Đúng rồi, mình chuyên làm WordPress và Laravel. Bạn cần gì không?",
+                content=(
+                    "Chào bạn! Đúng rồi, mình chuyên làm WordPress và Laravel. Bạn cần gì không?"
+                ),
                 language="vi",
-                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2, minutes=55)
+                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2, minutes=55),
             ),
             Message(
                 id=uuid.uuid4(),
                 conversation_id=conv1_id,
                 direction=MessageDirection.OUTBOUND,
-                content="À hay quá! Mình đang cần làm một trang web bán hàng. Giá khoảng bao nhiêu vậy bạn?",
+                content=(
+                    "À hay quá! Mình đang cần làm một trang web bán hàng. "
+                    "Giá khoảng bao nhiêu vậy bạn?"
+                ),
                 language="vi",
-                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2, minutes=50)
+                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2, minutes=50),
             ),
             Message(
                 id=uuid.uuid4(),
                 conversation_id=conv1_id,
                 direction=MessageDirection.INBOUND,
-                content="Tùy vào yêu cầu nhé. Web cơ bản thì $300-500, phức tạp hơn thì $800-1500. Bạn cần tính năng gì?",
+                content=(
+                    "Tùy vào yêu cầu nhé. Web cơ bản thì $300-500, "
+                    "phức tạp hơn thì $800-1500. Bạn cần tính năng gì?"
+                ),
                 language="vi",
-                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2, minutes=45)
+                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2, minutes=45),
             ),
             Message(
                 id=uuid.uuid4(),
                 conversation_id=conv1_id,
                 direction=MessageDirection.OUTBOUND,
-                content="Web bán quần áo thôi, có thanh toán online được càng tốt. Cho mình xin contact trực tiếp nhé!",
+                content=(
+                    "Web bán quần áo thôi, có thanh toán online được càng tốt. "
+                    "Cho mình xin contact trực tiếp nhé!"
+                ),
                 language="vi",
-                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2, minutes=40)
+                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2, minutes=40),
             ),
             Message(
                 id=uuid.uuid4(),
                 conversation_id=conv1_id,
                 direction=MessageDirection.INBOUND,
-                content="OK bạn add Zalo mình nhé: 0912345678. Hoặc email: tuan.webdev@gmail.com. Mình gửi portfolio cho!",
+                content=(
+                    "OK bạn add Zalo mình nhé: 0912345678. "
+                    "Hoặc email: tuan.webdev@gmail.com. Mình gửi portfolio cho!"
+                ),
                 language="vi",
-                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2, minutes=35)
+                created_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2, minutes=35),
             ),
         ]
         messages.extend(conv1_messages)
@@ -237,7 +262,7 @@ def create_demo_data():
             target_display_name="Money Exchange HCM",
             state=ConversationState.EXTRACTION,
             turn_count=4,
-            started_at=datetime.now(timezone.utc) - timedelta(hours=5)
+            started_at=datetime.now(timezone.utc) - timedelta(hours=5),
         )
         conversations.append(conv2)
 
@@ -248,7 +273,7 @@ def create_demo_data():
                 direction=MessageDirection.OUTBOUND,
                 content="Chào bạn! Mình cần đổi USD sang VND, bên bạn có dịch vụ này không?",
                 language="vi",
-                created_at=datetime.now(timezone.utc) - timedelta(hours=5)
+                created_at=datetime.now(timezone.utc) - timedelta(hours=5),
             ),
             Message(
                 id=uuid.uuid4(),
@@ -256,7 +281,7 @@ def create_demo_data():
                 direction=MessageDirection.INBOUND,
                 content="Có bạn ơi! Tỷ giá hôm nay 23,500 VND/USD. Bạn muốn đổi bao nhiêu?",
                 language="vi",
-                created_at=datetime.now(timezone.utc) - timedelta(hours=4, minutes=50)
+                created_at=datetime.now(timezone.utc) - timedelta(hours=4, minutes=50),
             ),
             Message(
                 id=uuid.uuid4(),
@@ -264,15 +289,18 @@ def create_demo_data():
                 direction=MessageDirection.OUTBOUND,
                 content="Khoảng $5000. Bên bạn có ship tiền tận nơi không? Ở quận 1.",
                 language="vi",
-                created_at=datetime.now(timezone.utc) - timedelta(hours=4, minutes=45)
+                created_at=datetime.now(timezone.utc) - timedelta(hours=4, minutes=45),
             ),
             Message(
                 id=uuid.uuid4(),
                 conversation_id=conv2_id,
                 direction=MessageDirection.INBOUND,
-                content="Có chứ! Phí ship 200k nhé. Bạn cần gặp trực tiếp hay chuyển khoản trước? Call/Zalo: 0908123456",
+                content=(
+                    "Có chứ! Phí ship 200k nhé. "
+                    "Bạn cần gặp trực tiếp hay chuyển khoản trước? Call/Zalo: 0908123456"
+                ),
                 language="vi",
-                created_at=datetime.now(timezone.utc) - timedelta(hours=4, minutes=40)
+                created_at=datetime.now(timezone.utc) - timedelta(hours=4, minutes=40),
             ),
         ]
         messages.extend(conv2_messages)
@@ -300,13 +328,13 @@ def create_demo_data():
                     "emails": ["tuan.webdev@gmail.com"],
                     "zalo_ids": [],
                     "telegram_handles": ["@lehoangtuan"],
-                    "facebook_urls": []
+                    "facebook_urls": [],
                 },
                 business_info={
                     "service_description": "WordPress and Laravel web development",
                     "price_range": "$300-1500",
                     "website": "",
-                    "prices": ["$300-500", "$800-1500"]
+                    "prices": ["$300-500", "$800-1500"],
                 },
                 activity_status=ActivityStatus.ACTIVE,
                 last_seen=datetime.now(timezone.utc) - timedelta(days=2, hours=2),
@@ -315,7 +343,7 @@ def create_demo_data():
                 operator_notes="专业的网站开发者,价格合理,有作品集",
                 dedup_fingerprint=uuid.uuid4().hex,
                 collected_at=datetime.now(timezone.utc) - timedelta(days=2, hours=2),
-                reviewed_at=datetime.now(timezone.utc) - timedelta(days=2, hours=1)
+                reviewed_at=datetime.now(timezone.utc) - timedelta(days=2, hours=1),
             ),
             IntelligenceRecord(
                 id=uuid.uuid4(),
@@ -332,13 +360,13 @@ def create_demo_data():
                     "emails": [],
                     "zalo_ids": ["0908123456"],
                     "telegram_handles": [],
-                    "facebook_urls": []
+                    "facebook_urls": [],
                 },
                 business_info={
                     "service_description": "USD/VND currency exchange with delivery service",
                     "price_range": "23,500 VND/USD + 200k fee",
                     "website": "",
-                    "prices": ["23,500 VND/USD"]
+                    "prices": ["23,500 VND/USD"],
                 },
                 activity_status=ActivityStatus.ACTIVE,
                 last_seen=datetime.now(timezone.utc) - timedelta(hours=4, minutes=40),
@@ -347,7 +375,7 @@ def create_demo_data():
                 operator_notes="提供换汇服务,支持送货上门,费率23,500",
                 dedup_fingerprint=uuid.uuid4().hex,
                 collected_at=datetime.now(timezone.utc) - timedelta(hours=4, minutes=40),
-                reviewed_at=None
+                reviewed_at=None,
             ),
             IntelligenceRecord(
                 id=uuid.uuid4(),
@@ -364,13 +392,13 @@ def create_demo_data():
                     "emails": ["contact@designstudio.vn"],
                     "zalo_ids": [],
                     "telegram_handles": ["@designstudiovn"],
-                    "facebook_urls": ["facebook.com/designstudiovn"]
+                    "facebook_urls": ["facebook.com/designstudiovn"],
                 },
                 business_info={
                     "service_description": "Full-service design studio",
                     "price_range": "Contact for quote",
                     "website": "designstudio.vn",
-                    "prices": []
+                    "prices": [],
                 },
                 activity_status=ActivityStatus.DORMANT,
                 last_seen=datetime.now(timezone.utc) - timedelta(days=7),
@@ -379,8 +407,8 @@ def create_demo_data():
                 operator_notes=None,
                 dedup_fingerprint=uuid.uuid4().hex,
                 collected_at=datetime.now(timezone.utc) - timedelta(days=7),
-                reviewed_at=None
-            )
+                reviewed_at=None,
+            ),
         ]
         db.add_all(intelligence_records)
         db.commit()

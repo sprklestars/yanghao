@@ -24,6 +24,7 @@ class Base(DeclarativeBase):
 
 # ── Enums ──────────────────────────────────────────────
 
+
 class Platform(str, enum.Enum):
     TELEGRAM = "telegram"
     FACEBOOK = "facebook"
@@ -82,6 +83,7 @@ class MessageDirection(str, enum.Enum):
 
 # ── Models ─────────────────────────────────────────────
 
+
 class Persona(Base):
     __tablename__ = "personas"
 
@@ -98,7 +100,9 @@ class Account(Base):
     platform: Mapped[Platform] = mapped_column(Enum(Platform))
     username: Mapped[str] = mapped_column(String(200))
     credentials: Mapped[dict] = mapped_column(JSON)
-    persona_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("personas.id"))
+    persona_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("personas.id")
+    )
     health: Mapped[AccountHealth] = mapped_column(Enum(AccountHealth), default=AccountHealth.GREEN)
     proxy_url: Mapped[str | None] = mapped_column(String(500))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -121,7 +125,9 @@ class Task(Base):
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.PENDING)
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="task")
     intelligence_records: Mapped[list["IntelligenceRecord"]] = relationship(back_populates="task")
@@ -135,22 +141,33 @@ class Conversation(Base):
     task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id"))
     target_user_id: Mapped[str] = mapped_column(String(200))
     target_display_name: Mapped[str | None] = mapped_column(String(300))
-    state: Mapped[ConversationState] = mapped_column(Enum(ConversationState), default=ConversationState.IDLE)
+    state: Mapped[ConversationState] = mapped_column(
+        Enum(ConversationState), default=ConversationState.IDLE
+    )
     turn_count: Mapped[int] = mapped_column(Integer, default=0)
     context_summary: Mapped[str | None] = mapped_column(Text)
+
+    @property
+    def account_name(self) -> str | None:
+        """账号显示名（sessions/ 下的会话名）。"""
+        return self.account.username if self.account else None
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     account: Mapped[Account] = relationship(back_populates="conversations")
     task: Mapped[Task] = relationship(back_populates="conversations")
-    messages: Mapped[list["Message"]] = relationship(back_populates="conversation", order_by="Message.created_at")
+    messages: Mapped[list["Message"]] = relationship(
+        back_populates="conversation", order_by="Message.created_at"
+    )
 
 
 class Message(Base):
     __tablename__ = "messages"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("conversations.id"))
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id")
+    )
     direction: Mapped[MessageDirection] = mapped_column(Enum(MessageDirection))
     content: Mapped[str] = mapped_column(Text)
     language: Mapped[str | None] = mapped_column(String(10))
@@ -178,10 +195,15 @@ class IntelligenceRecord(Base):
     activity_status: Mapped[ActivityStatus] = mapped_column(Enum(ActivityStatus))
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     response_rate: Mapped[float | None] = mapped_column(Float)
-    review_status: Mapped[ReviewStatus] = mapped_column(Enum(ReviewStatus), default=ReviewStatus.PENDING)
+    review_status: Mapped[ReviewStatus] = mapped_column(
+        Enum(ReviewStatus), default=ReviewStatus.PENDING
+    )
+    platforms: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     operator_notes: Mapped[str | None] = mapped_column(Text)
     dedup_fingerprint: Mapped[str | None] = mapped_column(String(128), index=True)
-    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    collected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     task: Mapped[Task] = relationship(back_populates="intelligence_records")

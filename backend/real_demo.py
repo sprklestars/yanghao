@@ -13,17 +13,19 @@
 
 import asyncio
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from telethon import TelegramClient
+
+from app.core.config import settings
+from app.core.session_paths import ensure_session_dir
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
 from app.services.security.account_warming import warming_manager
-from app.core.config import settings
 
 
 async def demo_real_telegram():
@@ -33,6 +35,7 @@ async def demo_real_telegram():
     print("=" * 70)
 
     session_name = "sessions/printer"
+    ensure_session_dir(session_name)
 
     print(f"\n📱 加载账号: {session_name}")
 
@@ -49,11 +52,11 @@ async def demo_real_telegram():
         await client.connect()
 
         if not await client.is_user_authorized():
-            print(f"   ❌ Session无效,需要重新登录")
+            print("   ❌ Session无效,需要重新登录")
             return None
 
         me = await client.get_me()
-        print(f"   ✅ 登录成功!")
+        print("   ✅ 登录成功!")
         print(f"      用户名: @{me.username or 'N/A'}")
         print(f"      姓名: {me.first_name} {me.last_name or ''}")
         print(f"      ID: {me.id}")
@@ -72,6 +75,7 @@ async def demo_real_telegram():
     except Exception as e:
         print(f"   ❌ 错误: {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -90,28 +94,30 @@ async def demo_search_groups(client):
         try:
             from telethon.tl.functions.messages import SearchRequest
 
-            results = await client(SearchRequest(
-                q=query,
-                filter=None,
-                min_date=None,
-                max_date=None,
-                offset_id=0,
-                add_offset=0,
-                limit=3,
-                max_id=0,
-                min_id=0,
-                hash=0,
-            ))
+            results = await client(
+                SearchRequest(
+                    q=query,
+                    filter=None,
+                    min_date=None,
+                    max_date=None,
+                    offset_id=0,
+                    add_offset=0,
+                    limit=3,
+                    max_id=0,
+                    min_id=0,
+                    hash=0,
+                )
+            )
 
             if results.chats:
                 print(f"   ✅ 找到 {len(results.chats)} 个群组:")
                 for i, chat in enumerate(results.chats[:3], 1):
-                    member_count = getattr(chat, 'participants_count', 'N/A')
+                    member_count = getattr(chat, "participants_count", "N/A")
                     print(f"      {i}. {chat.title}")
                     print(f"         成员数: {member_count}")
                     print(f"         ID: {chat.id}")
             else:
-                print(f"   ⚠️ 未找到相关群组")
+                print("   ⚠️ 未找到相关群组")
 
         except Exception as e:
             print(f"   ❌ 搜索失败: {e}")
@@ -179,19 +185,20 @@ async def demo_verification_flow():
     # 生成验证问题
     challenge_msg = verification_manager.get_challenge_message(test_user_id)
     if challenge_msg:
-        print(f"\n📩 系统发送验证消息:")
-        for line in challenge_msg.split('\n'):
+        print("\n📩 系统发送验证消息:")
+        for line in challenge_msg.split("\n"):
             print(f"   {line}")
 
     # 模拟用户回答
     import re
-    match = re.search(r'(\d+)\s*([+\-])\s*(\d+)', challenge_msg)
+
+    match = re.search(r"(\d+)\s*([+\-])\s*(\d+)", challenge_msg)
     if match:
         num1 = int(match.group(1))
         operator = match.group(2)
         num2 = int(match.group(3))
 
-        if operator == '+':
+        if operator == "+":
             correct_answer = str(num1 + num2)
         else:
             correct_answer = str(num1 - num2)
@@ -201,7 +208,7 @@ async def demo_verification_flow():
         print(f"   验证结果: {'通过' if is_correct else '失败'}")
 
         if is_correct:
-            print(f"   🎉 验证成功!用户可以开始对话")
+            print("   🎉 验证成功!用户可以开始对话")
 
 
 async def main():
@@ -209,10 +216,10 @@ async def main():
     print("\n" + "=" * 70)
     print("🚀 Telegram OSINT 系统 - 真实演示")
     print("=" * 70)
-    print(f"\n⚙️ 配置信息:")
+    print("\n⚙️ 配置信息:")
     print(f"   Telegram API ID: {settings.tg_api_id}")
     print(f"   DeepSeek Model: {settings.deepseek_model}")
-    print(f"   Session文件: sessions/printer.session")
+    print("   Session文件: sessions/printer.session")
     print()
 
     try:
@@ -250,6 +257,7 @@ async def main():
     except Exception as e:
         print(f"\n❌ 演示出错: {e}")
         import traceback
+
         traceback.print_exc()
 
 

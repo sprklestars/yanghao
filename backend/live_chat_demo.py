@@ -20,19 +20,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from datetime import datetime
+
 from telethon import TelegramClient, events
+
+from app.core.config import settings
+from app.core.proxy import telegram_proxy
+from app.core.session_paths import ensure_session_dir
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
 from app.services.security.account_warming import warming_manager
-from app.core.config import settings
-from datetime import datetime
-
 
 # 配置
 SESSION_NAME = "sessions/printer"
 
 # 代理配置(如果需要)
-PROXY = ('http', '127.0.0.1', 7890)  # (类型, 主机, 端口)
+# 代理来自 .env 的 TG_PROXY_URL（(类型, 主机, 端口) 由 app/core/proxy.py 解析）
+PROXY = telegram_proxy()
 
 # Persona配置
 PERSONA_CONFIG = {
@@ -57,13 +61,13 @@ async def handle_new_message(event):
         return
 
     user_id = str(sender.id)
-    user_name = getattr(sender, 'first_name', 'Unknown')
+    user_name = getattr(sender, "first_name", "Unknown")
     message_text = event.raw_text
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"📨 收到消息 from @{user_name} (ID: {user_id})")
     print(f"   内容: {message_text}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     # 检查养号限制
     allowed, reason = warming_manager.check_and_enforce_limits(
@@ -89,17 +93,20 @@ async def handle_new_message(event):
 
         if challenge_msg:
             # 发送验证问题
-            print(f"\n 发送验证问题...")
+            print("\n 发送验证问题...")
             await event.reply(challenge_msg)
-            print(f"✅ 验证问题已发送")
+            print("✅ 验证问题已发送")
             return
 
         # 用户回答了验证题
         is_correct = verification_manager.check_answer(user_id, message_text)
 
         if is_correct:
-            reply = "✅ Xác minh thành công! Bây giờ chúng ta có thể bắt đầu trò chuyện. 😊\n\nChào bạn! Mình là Nguyễn, rất vui được làm quen!"
-            print(f"\n✅ 验证通过!")
+            reply = (
+                "✅ Xác minh thành công! Bây giờ chúng ta có thể bắt đầu trò chuyện. 😊\n\n"
+                "Chào bạn! Mình là Nguyễn, rất vui được làm quen!"
+            )
+            print("\n✅ 验证通过!")
             print(f"🤖 回复: {reply}")
             await event.reply(reply)
 
@@ -108,13 +115,13 @@ async def handle_new_message(event):
             return
         else:
             reply = "❌ Câu trả lời không đúng. Vui lòng thử lại hoặc liên hệ quản trị viên."
-            print(f"\n❌ 验证失败")
+            print("\n❌ 验证失败")
             print(f"🤖 回复: {reply}")
             await event.reply(reply)
             return
 
     # 正常对话 - 使用AI生成回复
-    print(f"\n🤖 调用DeepSeek AI生成回复...")
+    print("\n🤖 调用DeepSeek AI生成回复...")
 
     engine = ConversationEngine()
 
@@ -140,9 +147,9 @@ async def handle_new_message(event):
         await asyncio.sleep(typing_delay)
 
         # 发送AI回复
-        print(f"\n📤 发送AI回复...")
+        print("\n📤 发送AI回复...")
         await event.reply(ai_reply)
-        print(f"✅ 回复已发送")
+        print("✅ 回复已发送")
 
         # 更新对话历史
         history.append({"role": "user", "content": message_text})
@@ -163,7 +170,7 @@ async def main():
     print("\n" + "=" * 70)
     print("🚀 Telegram OSINT - 实时AI互动演示")
     print("=" * 70)
-    print(f"\n⚙️ 配置:")
+    print("\n⚙️ 配置:")
     print(f"   Session: {SESSION_NAME}")
     print(f"   API ID: {settings.tg_api_id}")
     print(f"   代理: {PROXY[1]}:{PROXY[2]}")
@@ -187,6 +194,7 @@ async def main():
     )
 
     # 创建Telegram客户端(带代理)
+    ensure_session_dir(SESSION_NAME)
     client = TelegramClient(
         SESSION_NAME,
         settings.tg_api_id,
@@ -202,7 +210,7 @@ async def main():
         await client.start()
 
         me = await client.get_me()
-        print(f"\n✅ 连接成功!")
+        print("\n✅ 连接成功!")
         print(f"   用户名: @{me.username or 'N/A'}")
         print(f"   姓名: {me.first_name} {me.last_name or ''}")
         print(f"   ID: {me.id}")
@@ -224,6 +232,7 @@ async def main():
     except Exception as e:
         print(f"\n❌ 错误: {e}")
         import traceback
+
         traceback.print_exc()
         print("\n💡 提示: 如果连接失败,请检查:")
         print("   1. 代理是否运行(127.0.0.1:7890)")

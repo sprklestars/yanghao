@@ -26,7 +26,7 @@ async def test_login_and_search():
     print("=" * 60)
 
     # Create client
-    client = TelegramClient('test_session', API_ID, API_HASH)
+    client = TelegramClient("test_session", API_ID, API_HASH)
 
     try:
         # Start client (will prompt for phone if not logged in)
@@ -35,7 +35,7 @@ async def test_login_and_search():
 
         # Get user info
         me = await client.get_me()
-        print(f"\n✅ Login successful!")
+        print("\n✅ Login successful!")
         print(f"   Username: @{me.username or 'N/A'}")
         print(f"   Name: {me.first_name} {me.last_name or ''}")
         print(f"   ID: {me.id}")
@@ -52,23 +52,25 @@ async def test_login_and_search():
             print(f"\nSearching for: '{query}'...")
 
             try:
-                results = await client(functions.messages.SearchRequest(
-                    q=query,
-                    filter=None,
-                    min_date=None,
-                    max_date=None,
-                    offset_id=0,
-                    add_offset=0,
-                    limit=5,
-                    max_id=0,
-                    min_id=0,
-                    hash=0,
-                ))
+                results = await client(
+                    functions.messages.SearchRequest(
+                        q=query,
+                        filter=None,
+                        min_date=None,
+                        max_date=None,
+                        offset_id=0,
+                        add_offset=0,
+                        limit=5,
+                        max_id=0,
+                        min_id=0,
+                        hash=0,
+                    )
+                )
 
                 if results.chats:
                     print(f"   Found {len(results.chats)} groups:")
                     for i, chat in enumerate(results.chats[:3], 1):
-                        member_count = getattr(chat, 'participants_count', 'N/A')
+                        member_count = getattr(chat, "participants_count", "N/A")
                         print(f"   {i}. {chat.title}")
                         print(f"      Members: {member_count}")
                         print(f"      ID: {chat.id}")
@@ -107,6 +109,7 @@ async def test_login_and_search():
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
+
         traceback.print_exc()
 
     finally:

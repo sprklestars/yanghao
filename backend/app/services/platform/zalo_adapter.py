@@ -46,9 +46,9 @@ class ZaloAdapter(PlatformAdapter):
                 logger.error("zlapi not installed. Install with: pip install zlapi")
                 return False
 
-            phone = credentials.credentials.get('phone')
-            password = credentials.credentials.get('password')
-            imei = credentials.credentials.get('imei')
+            phone = credentials.credentials.get("phone")
+            password = credentials.credentials.get("password")
+            imei = credentials.credentials.get("imei")
 
             if not phone:
                 logger.error("Zalo phone number required")
@@ -61,14 +61,15 @@ class ZaloAdapter(PlatformAdapter):
             try:
                 import json
                 import os
+
                 if os.path.exists(self._cookie_file):
-                    with open(self._cookie_file, 'r', encoding='utf-8') as f:
+                    with open(self._cookie_file, "r", encoding="utf-8") as f:
                         session_data = json.load(f)
 
                     self._client = ZaloAPI(
                         phone=phone,
                         imei=self._imei,
-                        cookie=session_data.get('cookie'),
+                        cookie=session_data.get("cookie"),
                     )
                     logger.info("Loaded saved Zalo session")
                     self._is_authenticated = True
@@ -84,24 +85,22 @@ class ZaloAdapter(PlatformAdapter):
             self._client = ZaloAPI(phone=phone, imei=self._imei)
 
             # Login (this may require manual verification)
-            login_result = await asyncio.to_thread(
-                self._client.login,
-                password=password
-            )
+            login_result = await asyncio.to_thread(self._client.login, password=password)
 
             if login_result:
                 # Save session data
                 import json
                 import os
-                os.makedirs('sessions', exist_ok=True)
+
+                os.makedirs("sessions", exist_ok=True)
 
                 session_data = {
-                    'cookie': self._client.get_cookie(),
-                    'imei': self._imei,
-                    'phone': phone,
+                    "cookie": self._client.get_cookie(),
+                    "imei": self._imei,
+                    "phone": phone,
                 }
 
-                with open(self._cookie_file, 'w', encoding='utf-8') as f:
+                with open(self._cookie_file, "w", encoding="utf-8") as f:
                     json.dump(session_data, f)
 
                 self._is_authenticated = True
@@ -141,13 +140,15 @@ class ZaloAdapter(PlatformAdapter):
             groups = await asyncio.to_thread(self._client.get_groups)
 
             for i, group in enumerate(groups[:limit]):
-                results.append(GroupInfo(
-                    group_id=str(group.get('id', '')),
-                    name=group.get('name', f'Group {i+1}'),
-                    member_count=group.get('member_count', 0),
-                    description=group.get('description', ''),
-                    platform=PlatformName.ZALO,
-                ))
+                results.append(
+                    GroupInfo(
+                        group_id=str(group.get("id", "")),
+                        name=group.get("name", f"Group {i + 1}"),
+                        member_count=group.get("member_count", 0),
+                        description=group.get("description", ""),
+                        platform=PlatformName.ZALO,
+                    )
+                )
 
             logger.info("Found %d Zalo groups", len(results))
 
@@ -166,10 +167,7 @@ class ZaloAdapter(PlatformAdapter):
                 return False
 
             # Zalo groups typically require admin approval
-            result = await asyncio.to_thread(
-                self._client.join_group,
-                group_id
-            )
+            result = await asyncio.to_thread(self._client.join_group, group_id)
 
             if result:
                 self._daily_actions += 1
@@ -190,10 +188,7 @@ class ZaloAdapter(PlatformAdapter):
             if not self._client:
                 return False
 
-            result = await asyncio.to_thread(
-                self._client.add_friend,
-                user_id
-            )
+            result = await asyncio.to_thread(self._client.add_friend, user_id)
 
             if result:
                 self._daily_actions += 1
@@ -221,11 +216,7 @@ class ZaloAdapter(PlatformAdapter):
             await asyncio.sleep(min(typing_delay, 10))
 
             # Send message
-            result = await asyncio.to_thread(
-                self._client.send_message,
-                target_id,
-                content.text
-            )
+            result = await asyncio.to_thread(self._client.send_message, target_id, content.text)
 
             if result:
                 self._daily_actions += 1
@@ -253,27 +244,25 @@ class ZaloAdapter(PlatformAdapter):
             while True:
                 try:
                     # Get recent conversations
-                    conversations = await asyncio.to_thread(
-                        self._client.get_recent_conversations
-                    )
+                    conversations = await asyncio.to_thread(self._client.get_recent_conversations)
 
                     for conv in conversations:
                         # Check for new messages
                         messages = await asyncio.to_thread(
-                            self._client.get_messages,
-                            conv.get('id'),
-                            limit=1
+                            self._client.get_messages, conv.get("id"), limit=1
                         )
 
                         if messages:
                             latest_msg = messages[0]
-                            await callback({
-                                "sender_id": str(latest_msg.get('from_id', '')),
-                                "sender_name": latest_msg.get('from_name', ''),
-                                "text": latest_msg.get('text', ''),
-                                "chat_id": str(conv.get('id', '')),
-                                "timestamp": latest_msg.get('timestamp', ''),
-                            })
+                            await callback(
+                                {
+                                    "sender_id": str(latest_msg.get("from_id", "")),
+                                    "sender_name": latest_msg.get("from_name", ""),
+                                    "text": latest_msg.get("text", ""),
+                                    "chat_id": str(conv.get("id", "")),
+                                    "timestamp": latest_msg.get("timestamp", ""),
+                                }
+                            )
 
                 except Exception as e:
                     logger.warning("Error in message listener: %s", e)
@@ -289,17 +278,14 @@ class ZaloAdapter(PlatformAdapter):
             if not self._client:
                 return None
 
-            profile = await asyncio.to_thread(
-                self._client.get_user_info,
-                user_id
-            )
+            profile = await asyncio.to_thread(self._client.get_user_info, user_id)
 
             if profile:
                 return UserProfile(
                     user_id=user_id,
-                    display_name=profile.get('display_name', ''),
-                    username=profile.get('username'),
-                    avatar_url=profile.get('avatar_url'),
+                    display_name=profile.get("display_name", ""),
+                    username=profile.get("username"),
+                    avatar_url=profile.get("avatar_url"),
                 )
 
             return None
@@ -316,17 +302,16 @@ class ZaloAdapter(PlatformAdapter):
             if not self._client:
                 return members
 
-            group_members = await asyncio.to_thread(
-                self._client.get_group_members,
-                group_id
-            )
+            group_members = await asyncio.to_thread(self._client.get_group_members, group_id)
 
             for member in group_members[:limit]:
-                members.append(UserProfile(
-                    user_id=str(member.get('id', '')),
-                    display_name=member.get('display_name', ''),
-                    username=member.get('username'),
-                ))
+                members.append(
+                    UserProfile(
+                        user_id=str(member.get("id", "")),
+                        display_name=member.get("display_name", ""),
+                        username=member.get("username"),
+                    )
+                )
 
             logger.info("Retrieved %d members from Zalo group: %s", len(members), group_id)
 
@@ -358,7 +343,9 @@ class ZaloAdapter(PlatformAdapter):
         )
 
     async def is_session_valid(self) -> dict:
-        import os, time
+        import os
+        import time
+
         if not os.path.exists(self._cookie_file):
             return {"valid": False, "message": "Session 文件不存在，请先登录", "details": {}}
         try:
@@ -368,7 +355,10 @@ class ZaloAdapter(PlatformAdapter):
             if hours_since_login > 48:
                 return {
                     "valid": False,
-                    "message": f"Cookie 已过期 ({round(hours_since_login, 1)}小时前保存，Zalo Cookie 有效期约48小时)",
+                    "message": (
+                        f"Cookie 已过期 ({round(hours_since_login, 1)}小时前保存，"
+                        "Zalo Cookie 有效期约48小时)"
+                    ),
                     "details": {"hours_since_login": round(hours_since_login, 1)},
                 }
             msg = f"Cookie 有效 ({round(hours_since_login, 1)}小时前保存)"
@@ -379,7 +369,10 @@ class ZaloAdapter(PlatformAdapter):
             return {
                 "valid": True,
                 "message": msg,
-                "details": {"hours_since_login": round(hours_since_login, 1), "days_left": round(days_left, 1)},
+                "details": {
+                    "hours_since_login": round(hours_since_login, 1),
+                    "days_left": round(days_left, 1),
+                },
             }
         except Exception as e:
             return {"valid": False, "message": f"检测失败: {e}", "details": {"error": str(e)}}
@@ -394,7 +387,7 @@ class ZaloAdapter(PlatformAdapter):
         hash_hex = hashlib.md5(raw.encode()).hexdigest()
 
         # Format as IMEI (15 digits)
-        imei = ''.join(filter(str.isdigit, hash_hex))[:14]
+        imei = "".join(filter(str.isdigit, hash_hex))[:14]
         imei += str(sum(int(d) for d in imei) % 10)  # Luhn check digit
 
         return imei
