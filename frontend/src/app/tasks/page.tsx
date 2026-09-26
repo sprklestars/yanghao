@@ -58,11 +58,17 @@ export default function TasksPage() {
 
   const platformAccounts = accounts.filter((a) => a.platform === form.platform);
 
+  // 🔴 失效 / ⚫ 需人工 的账号后端会自动跳过，前端就别让用户白勾了
+  const isUnusable = (a: Account) => a.health === 'red' || a.health === 'black';
+  const healthTagText = (a: Account) => (a.health === 'black' ? '需人工' : '失效');
+
   // 切换平台时，把账号选择重置为该平台下的第一个（多选默认只勾第一个）
   useEffect(() => {
     setTaskAccounts((current) => {
       const stillValid = current.filter((id) => platformAccounts.some((a) => a.id === id));
-      return stillValid.length ? stillValid : platformAccounts[0] ? [platformAccounts[0].id] : [];
+      if (stillValid.length) return stillValid;
+      const firstUsable = platformAccounts.find((a) => !isUnusable(a));
+      return firstUsable ? [firstUsable.id] : [];
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.platform, accounts]);
@@ -407,25 +413,44 @@ export default function TasksPage() {
           <div className="text-xs font-medium text-slate-500 mb-1.5">
             使用账号（可多选，串行执行）{platformAccounts.length === 0 && ' —— 该平台暂无账号'}
           </div>
-          {platformAccounts.map((a) => (
-            <label key={a.id} className="flex items-center gap-2 py-1 text-sm cursor-pointer">
-              <input
-                type="checkbox"
-                checked={taskAccounts.includes(a.id)}
-                onChange={(e) =>
-                  setTaskAccounts((prev) =>
-                    e.target.checked
-                      ? [...prev, a.id]
-                      : prev.filter((id) => id !== a.id),
-                  )
-                }
-              />
-              <span>
-                {a.display_name || a.username || a.id}
-                {a.paused ? '（已暂停）' : ''}
-              </span>
-            </label>
-          ))}
+          {platformAccounts.map((a) => {
+            const unusable = isUnusable(a);
+            return (
+              <label
+                key={a.id}
+                title={a.health_reason || ''}
+                className={`flex items-center gap-2 py-1 text-sm ${unusable ? 'text-slate-400 cursor-not-allowed' : 'cursor-pointer'}`}
+              >
+                <input
+                  type="checkbox"
+                  disabled={unusable}
+                  checked={taskAccounts.includes(a.id)}
+                  onChange={(e) =>
+                    setTaskAccounts((prev) =>
+                      e.target.checked
+                        ? [...prev, a.id]
+                        : prev.filter((id) => id !== a.id),
+                    )
+                  }
+                />
+                <span>
+                  {a.display_name || a.username || a.id}
+                  {a.paused ? '（已暂停）' : ''}
+                </span>
+                {unusable && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded-full text-xs border ${
+                      a.health === 'black'
+                        ? 'bg-gray-900 text-white border-gray-700'
+                        : 'bg-rose-50 text-rose-700 border-rose-200'
+                    }`}
+                  >
+                    {healthTagText(a)} · 不参与
+                  </span>
+                )}
+              </label>
+            );
+          })}
         </div>
         <div className="grid grid-cols-3 gap-3">
           {[

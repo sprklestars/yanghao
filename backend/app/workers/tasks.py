@@ -113,23 +113,48 @@ def _telegram_session_candidates(
     return sorted(SESSION_DIR.glob("*.session"))
 
 
-def _platform_session_candidates(task: Task) -> list[Path]:
-    """按平台挑候选登录态文件：优先任务指定（或界面勾选）的账号名，否则取第一个匹配文件。"""
+def _platform_session_candidates(task: Task) -> tuple[list[Path], dict[str, str]]:
+    """按平台挑候选登录态文件，并**剔除不可参与任务的账号**。
+
+    返回 ``(可用的登录态文件, {被跳过的账号名: 原因})``。
+
+    不可参与 = 账号状态是 🔴 失效 / ⚫ 需人工（被安全验证、封号、登录过期…）：
+    这类账号跑任务必然失败，还会白白消耗配额，所以自动跳过并在结果里说明原因。
+    """
+    from app.core.account_status import task_eligibility
+
     platform = task.platform
     config = task.config or {}
     requested = config.get("accounts") or ([config["account"]] if config.get("account") else [])
     suffix = PLATFORM_SESSION_SUFFIX[platform.value]
 
     paths: list[Path] = []
+    skipped: dict[str, str] = {}
     for name in requested:
         candidate = platform_session_path(platform, name)
-        if candidate.exists():
-            paths.append(candidate)
-        else:
+        if not candidate.exists():
             logger.warning("任务指定的账号不存在，跳过：%s", candidate.name)
-    if paths:
-        return paths
-    return sorted(SESSION_DIR.glob(f"*{suffix}"))
+            skipped[name] = "登录态文件不存在"
+            continue
+        allowed, reason = task_eligibility(name)
+        if not allowed:
+            logger.warning("账号 %s 不可用，已跳过：%s", name, reason)
+            skipped[name] = reason
+            continue
+        paths.append(candidate)
+
+    if not requested:
+        # 没指定账号时按平台自动挑：同样只挑可用的
+        for candidate in sorted(SESSION_DIR.glob(f"*{suffix}")):
+            name = platform_session_name(platform, candidate)
+            allowed, reason = task_eligibility(name)
+            if not allowed:
+                logger.warning("账号 %s 不可用，已跳过：%s", name, reason)
+                skipped[name] = reason
+                continue
+            paths.append(candidate)
+
+    return paths, skipped
 
 
 def _build_adapter(platform: Platform, session_path: Path):
@@ -412,12 +437,37 @@ def _run_task_pipeline(task_id: str):
             # 账号来源优先级：task.config["accounts"]（界面勾选/多选）
             # > ["account"]（单选）> 自动挑第一个登录态文件。
             # 多账号**串行**各跑一轮：一个账号结束并断开后，再轮到下一个。
-            session_candidates = _platform_session_candidates(task)
+            session_candidates, skipped_accounts = _platform_session_candidates(task)
             if not session_candidates:
                 suffix = PLATFORM_SESSION_SUFFIX[task.platform.value]
                 logger.warning(
                     "sessions/ 下没有 %s 的登录态文件（*%s）", task.platform.value, suffix
                 )
+                if skipped_accounts:
+                    # 不是没有账号，而是账号都被判定为不可用：把原因写进任务结果
+                    detail = "；".join(
+                        f"{name}：{reason}" for name, reason in skipped_accounts.items()
+                    )
+                    task.config = {
+                        **(task.config or {}),
+                        "progress": None,
+                        "last_run": {
+                            "searched_keywords": 0,
+                            "found_groups": 0,
+                            "joined_groups": 0,
+                            "members_found": 0,
+                            "dm_failed": 0,
+                            "conversations": 0,
+                            "blocked_by_limit": 0,
+                            "platform": task.platform.value,
+                            "account": None,
+                            "accounts": {},
+                            "skipped_accounts": skipped_accounts,
+                            "error": None,
+                            "warning": f"没有可用账号：{detail}",
+                            "finished_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                    }
                 task.status = TaskStatus.FAILED
                 db.commit()
                 return
@@ -435,6 +485,14 @@ def _run_task_pipeline(task_id: str):
                 "accounts": {},
                 "error": None,
             }
+            if skipped_accounts:
+                summary["skipped_accounts"] = skipped_accounts
+                for name, reason in skipped_accounts.items():
+                    summary["accounts"][name] = {
+                        "account": name,
+                        "skipped": True,
+                        "skip_reason": reason,
+                    }
 
             async def _campaign() -> None:
                 """整个外呼流程跑在同一个事件循环里。
@@ -567,6 +625,15 @@ def _run_task_pipeline(task_id: str):
                 summary["warning"] = "有群但未能加入（可能被养号限额、新号自检或平台限流拦截）"
             else:
                 summary["warning"] = None
+
+            # 被跳过的不可用账号必须让人看见，否则用户会以为"我勾了它怎么没跑"
+            skipped_map = summary.get("skipped_accounts") or {}
+            if skipped_map:
+                detail = "；".join(f"{name}：{reason}" for name, reason in skipped_map.items())
+                skip_note = f"已跳过 {len(skipped_map)} 个不可用账号（{detail}）"
+                summary["warning"] = (
+                    f"{summary['warning']}；{skip_note}" if summary.get("warning") else skip_note
+                )
 
             # 把这次跑的结果记进 task.config，前端能看到"跑完到底做了几件事"
             task.config = {

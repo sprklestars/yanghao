@@ -29,6 +29,26 @@ logger = logging.getLogger(__name__)
 
 HEALTH_LEVELS: tuple[str, ...] = ("green", "yellow", "red", "black")
 
+# 这些状态一律不参与任务：
+#   red   登录态失效 —— 跑起来必然失败，白费配额
+#   black 需要人工 —— 被平台拦下（安全验证/封号），人工没处理完之前不能碰
+TASK_BLOCKED_HEALTH: tuple[str, ...] = ("red", "black")
+TASK_BLOCKED_LABELS = {"red": "失效", "black": "需人工"}
+
+
+def task_eligibility(account_name: str) -> tuple[bool, str]:
+    """这个账号能不能参与任务：``(可参与, 不可参与的原因)``。"""
+    if not account_name:
+        return False, "账号名为空"
+    meta = read_account_meta(account_name)
+    health = str(meta.get("health", "green"))
+    if health in TASK_BLOCKED_HEALTH:
+        label = TASK_BLOCKED_LABELS.get(health, health)
+        reason = str(meta.get("health_reason") or "").strip()
+        detail = f"：{reason}" if reason else ""
+        return False, f"账号状态为「{label}」，已自动跳过{detail}"
+    return True, ""
+
 
 def meta_path(account_name: str) -> Path:
     return SESSION_DIR / f"{account_name}_meta.json"

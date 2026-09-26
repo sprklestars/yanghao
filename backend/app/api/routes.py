@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -1158,6 +1159,52 @@ async def create_task(body: TaskCreate, db: AsyncSession = Depends(get_db)):
     return task
 
 
+# 自动容器任务：persist_message() / reply_service 为了把会话挂到某个任务下，
+# 会自动建 "Auto-<平台>" 任务。它们的状态一直是 RUNNING（没人会去结束它），
+# 但**不是**用户在跑的任务 —— 不能拿它们去拦新任务，否则 Telegram 任务会永远点不动。
+AUTO_TASK_NAME_PREFIX = "Auto-"
+# 运行中但长时间没有任何进度更新 = 卡死（进程被杀、测试中断都会留下这种任务）
+STALE_RUNNING_MINUTES = 45
+
+
+def auto_container_task_id(platform: str):
+    """自动容器任务的确定性 id（与 persist_message() 里的算法保持一致）。"""
+    return uuid.uuid5(uuid.NAMESPACE_DNS, f"task-auto-{platform}")
+
+
+def is_auto_container_task(task) -> bool:
+    """这个任务是不是"自动容器"（不是用户创建的外呼任务）。"""
+    if str(getattr(task, "name", "") or "").startswith(AUTO_TASK_NAME_PREFIX):
+        return True
+    platform = getattr(task, "platform", None)
+    platform_value = getattr(platform, "value", platform)
+    if not platform_value:
+        return False
+    return str(getattr(task, "id", "")) == str(auto_container_task_id(str(platform_value)))
+
+
+def blocking_running_peer(peers, *, task_uuid, stale_before):
+    """从"同平台运行中"的任务里挑出真正挡路的。
+
+    返回 ``(挡路的任务 or None, 判定为卡死的任务列表)``：
+    自动容器任务直接忽略；超过 ``stale_before`` 没有更新的算卡死，由调用方收尾。
+    """
+    blocking = None
+    stale: list = []
+    for peer in peers:
+        if str(getattr(peer, "id", "")) == str(task_uuid):
+            continue
+        if is_auto_container_task(peer):
+            continue
+        updated = getattr(peer, "updated_at", None)
+        if updated is not None and updated < stale_before:
+            stale.append(peer)
+            continue
+        if blocking is None:
+            blocking = peer
+    return blocking, stale
+
+
 @router.post("/tasks/{task_id}/start")
 async def start_task(task_id: str, db: AsyncSession = Depends(get_db)):
     """Start executing a task.
@@ -1180,16 +1227,41 @@ async def start_task(task_id: str, db: AsyncSession = Depends(get_db)):
     if task.status == TaskStatus.RUNNING:
         raise HTTPException(status_code=400, detail="任务已在运行中")
 
-    # 同一平台已有任务在跑：它们会抢同一批账号的登录态（worker 并发 2）
-    running_peer = (
+    # 同一平台已有任务在跑：它们会抢同一批账号的登录态（worker 并发 2）。
+    # 但要排除两类"假的正在运行"：① 自动容器任务 Auto-<平台>；
+    # ② 早就卡死、长时间没进度的任务（顺手标记为失败，别让它一直堵着平台）。
+    peers = (
         await db.execute(
             select(Task)
             .where(Task.id != task_uuid)
             .where(Task.platform == task.platform)
             .where(Task.status == TaskStatus.RUNNING)
-            .limit(1)
         )
-    ).scalar_one_or_none()
+    ).scalars().all()
+    stale_before = datetime.now(timezone.utc) - timedelta(minutes=STALE_RUNNING_MINUTES)
+    running_peer, stale_tasks = blocking_running_peer(
+        peers, task_uuid=task_uuid, stale_before=stale_before
+    )
+    for dead in stale_tasks:
+        logger.warning(
+            "任务 %s（%s）超过 %d 分钟没有进度，判定为卡死并标记失败",
+            dead.name,
+            dead.platform.value,
+            STALE_RUNNING_MINUTES,
+        )
+        dead.status = TaskStatus.FAILED
+        dead.config = {
+            **(dead.config or {}),
+            "progress": None,
+            "last_run": {
+                **(dead.config or {}).get("last_run", {}),
+                "warning": f"任务卡死（超过 {STALE_RUNNING_MINUTES} 分钟没有进度），已自动结束",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+    if stale_tasks:
+        db.add_all(stale_tasks)
+        await db.commit()
     if running_peer is not None:
         raise HTTPException(
             status_code=400,
@@ -1419,7 +1491,9 @@ async def list_tasks(db: AsyncSession = Depends(get_db)):
     # 排除 persist_message() 自动建的容器任务（Auto-<平台>）：它们不是用户创建的任务，
     # 只是为了让守护进程收发的消息有地方挂 conversation 而已。
     result = await db.execute(
-        select(Task).where(~Task.name.like("Auto-%")).order_by(Task.created_at.desc())
+        select(Task)
+        .where(~Task.name.like(f"{AUTO_TASK_NAME_PREFIX}%"))
+        .order_by(Task.created_at.desc())
     )
     return result.scalars().all()
 
