@@ -4,6 +4,7 @@ from enum import Enum
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.models.models import ConversationState
 from app.services.conversation.verification import verification_manager
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,17 @@ class ConvState(str, Enum):
     PIVOT = "pivot"
     EXIT = "exit"
     COOLDOWN = "cooldown"
+
+
+def db_state_for(engine_state: ConvState) -> ConversationState:
+    """引擎 8 态 → DB 7 态。VERIFICATION 是瞬态挑战，落库时回 IDLE。"""
+    if engine_state == ConvState.VERIFICATION:
+        return ConversationState.IDLE
+    return ConversationState(engine_state.value)
+
+
+def engine_state_from(db_state: ConversationState) -> ConvState:
+    return ConvState(db_state.value)
 
 
 SYSTEM_PROMPT_TEMPLATE = """\

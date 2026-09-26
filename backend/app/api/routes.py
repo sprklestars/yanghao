@@ -1019,6 +1019,60 @@ async def delete_task(task_id: str, db: AsyncSession = Depends(get_db)):
     return {"status": "deleted", "task_id": str(task_uuid)}
 
 
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str, db: AsyncSession = Depends(get_db)):
+    """取消任务：运行中则立取消标记，流水线会在下个检查点停下。"""
+    from datetime import datetime, timezone
+
+    try:
+        task_uuid = uuid.UUID(str(task_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="任务 ID 格式不正确")
+
+    task = (await db.execute(select(Task).where(Task.id == task_uuid))).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    running = task.status == TaskStatus.RUNNING
+    config = dict(task.config or {})
+    config["cancel_requested"] = True
+    if not running:
+        task.status = TaskStatus.FAILED
+        config["progress"] = None
+        config["last_run"] = {
+            **(config.get("last_run") or {}),
+            "error": "用户取消",
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+    task.config = config
+    await db.commit()
+    return {
+        "status": "cancelling" if running else "cancelled",
+        "task_id": str(task_uuid),
+    }
+
+
+@router.post("/tasks/{task_id}/pause")
+async def pause_task(task_id: str, db: AsyncSession = Depends(get_db)):
+    """暂停任务（仅对未运行的任务有效；运行中的任务请用「取消」）。"""
+    try:
+        task_uuid = uuid.UUID(str(task_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="任务 ID 格式不正确")
+
+    task = (await db.execute(select(Task).where(Task.id == task_uuid))).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status == TaskStatus.RUNNING:
+        raise HTTPException(
+            status_code=400, detail="运行中的任务不能暂停，请用「取消」停止后再操作"
+        )
+
+    task.status = TaskStatus.PAUSED
+    await db.commit()
+    return {"status": "paused", "task_id": str(task_uuid)}
+
+
 @router.get("/tasks", response_model=list[TaskResponse])
 async def list_tasks(db: AsyncSession = Depends(get_db)):
     # 排除 persist_message() 自动建的容器任务（Auto-<平台>）：它们不是用户创建的任务，

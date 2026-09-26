@@ -136,6 +136,18 @@ export default function TasksPage() {
     }
   }
 
+  async function cancelTask(taskId: string) {
+    if (!confirm('确定取消这个正在运行的任务吗？它会停在下一个检查点。')) return;
+    try {
+      await fetchAPI(`/tasks/${taskId}/cancel`, { method: 'POST' });
+      await loadTasks();
+      setNotice({ kind: 'ok', text: '已请求取消，任务会在下个检查点停止。' });
+    } catch (error: any) {
+      console.error('Failed to cancel task:', error);
+      setNotice({ kind: 'error', text: `取消失败：${error?.message || '请检查后端服务'}` });
+    }
+  }
+
   const workerService = services.find((s) => s.platform === 'worker');
   const telegramService = services.find((s) => s.platform === 'telegram');
   const telegramBusy = !!telegramService?.running;
@@ -304,7 +316,14 @@ export default function TasksPage() {
             <tr key={t.id} className="border-t text-sm">
               <td className="px-4 py-2 font-medium">
                 {t.name}
-                {t.config?.last_run && (
+                {t.status === 'running' && t.config?.progress ? (
+                  <div className="text-xs text-amber-600 font-normal mt-0.5">
+                    {t.config.progress.stage || '执行中'}
+                    {t.config.progress.keyword ? ` · ${t.config.progress.keyword}` : ''}
+                    {t.config.progress.group ? ` · ${t.config.progress.group}` : ''}
+                    {t.config.progress.target ? ` · ${t.config.progress.target}` : ''}
+                  </div>
+                ) : t.config?.last_run ? (
                   <div className="text-xs text-slate-500 font-normal mt-0.5">
                     上次运行：账号 {t.config.last_run.account ?? '-'} · 搜索{' '}
                     {t.config.last_run.searched_keywords ?? 0} 个关键词 · 找到{' '}
@@ -313,7 +332,7 @@ export default function TasksPage() {
                     {t.config.last_run.members_found ?? 0} 个目标 · 发起{' '}
                     {t.config.last_run.conversations ?? 0} 个会话
                   </div>
-                )}
+                ) : null}
               </td>
               <td className="px-4 py-2 capitalize">{t.platform === 'telegram' ? '✈️ Telegram' : t.platform}</td>
               <td className="px-4 py-2">
@@ -336,7 +355,7 @@ export default function TasksPage() {
                 </span>
               </td>
               <td className="px-4 py-2 space-x-2">
-                {t.status === 'pending' && (
+                {(t.status === 'pending' || t.status === 'paused') && (
                   <button
                     onClick={() => startTask(t.id)}
                     disabled={(telegramBusy && t.platform === 'telegram') || t.platform !== 'telegram'}
@@ -349,11 +368,16 @@ export default function TasksPage() {
                     }
                     className="bg-green-600 text-white px-3 py-1 rounded text-xs hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
-                    ▶️ 启动
+                    {t.status === 'paused' ? '▶️ 继续' : '▶️ 启动'}
                   </button>
                 )}
                 {t.status === 'running' && (
-                  <span className="text-xs text-gray-500">执行中...</span>
+                  <button
+                    onClick={() => cancelTask(t.id)}
+                    className="bg-rose-600 text-white px-3 py-1 rounded text-xs hover:bg-rose-700"
+                  >
+                    ⏹ 取消
+                  </button>
                 )}
                 <button
                   onClick={() => deleteTask(t.id)}

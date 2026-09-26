@@ -33,6 +33,25 @@ from app.services.platform.telegram_adapter import TelegramAdapter
 logger = logging.getLogger(__name__)
 
 
+class TaskCancelledError(Exception):
+    """任务被用户在运行中取消（不再重试）。"""
+
+
+def _cancel_requested(db, task_id) -> bool:
+    """实时读取 DB 里的取消标记（API 在另一个进程里写，本地对象看不到）。"""
+    fresh = db.execute(select(Task).where(Task.id == task_id)).scalar_one_or_none()
+    return bool(fresh and (fresh.config or {}).get("cancel_requested"))
+
+
+def _set_progress(db, task, **fields) -> None:
+    """把进度写进 task.config["progress"]，任务详情页实时读这里。"""
+    config = dict(task.config or {})
+    progress = dict(config.get("progress") or {})
+    progress.update(fields)
+    task.config = {**config, "progress": progress}
+    db.commit()
+
+
 def _get_or_create_account_for_session(db, session_file) -> Account:
     """sessions/ 目录里的账号在 DB 里没有对应行时补登记一条。
 
@@ -197,17 +216,26 @@ def _run_task_pipeline(task_id: str):
                         account = _get_or_create_account_for_session(db, used_session)
                     summary["account"] = account.username
                     logger.info("本次外呼使用账号: %s", used_session.name)
+                    _set_progress(db, task, stage="已就绪", account=account.username)
                     try:
                         # 4. Search groups by keywords
                         for keyword in task.keywords[:3]:  # Limit to first 3 keywords
+                            if _cancel_requested(db, task.id):
+                                raise TaskCancelledError()
+                            _set_progress(db, task, stage="搜索群组", keyword=keyword)
                             logger.info("Searching for keyword: %s", keyword)
                             groups = await adapter.search_groups(query=keyword, limit=5)
                             summary["searched_keywords"] += 1
 
                             for group in groups:
+                                if _cancel_requested(db, task.id):
+                                    raise TaskCancelledError()
                                 summary["found_groups"] += 1
                                 logger.info(
                                     "Found group: %s (%s members)", group.name, group.member_count
+                                )
+                                _set_progress(
+                                    db, task, stage="加入群组", keyword=keyword, group=group.name
                                 )
 
                                 # 5. Join group
@@ -224,16 +252,32 @@ def _run_task_pipeline(task_id: str):
                                     len(members),
                                     group.group_id,
                                 )
+                                _set_progress(
+                                    db,
+                                    task,
+                                    stage="采集目标",
+                                    group=group.name,
+                                    members=len(members),
+                                )
                                 summary["members_found"] += len(members)
 
                                 # 6. Start conversations with selected members
                                 for member in members[:5]:  # Limit to 5 members per group
+                                    if _cancel_requested(db, task.id):
+                                        raise TaskCancelledError()
                                     # 有用户名就用 @username 私聊（数字 id 需要实体缓存，
                                     # 拉不到成员列表时并不可靠）
                                     target = (
                                         f"@{member.username}"
                                         if member.username
                                         else member.user_id
+                                    )
+                                    _set_progress(
+                                        db,
+                                        task,
+                                        stage="私聊目标",
+                                        group=group.name,
+                                        target=member.display_name,
                                     )
                                     conv_id = await _start_conversation(
                                         db=db,
@@ -257,11 +301,26 @@ def _run_task_pipeline(task_id: str):
                         # 之后再跑任务/常驻服务会报 "database is locked"。
                         await adapter.disconnect()
 
-                asyncio.run(_campaign())
+                try:
+                    asyncio.run(_campaign())
+                except TaskCancelledError:
+                    summary["error"] = "用户取消"
+                    task.status = TaskStatus.FAILED
+                    task.config = {
+                        **(task.config or {}),
+                        "progress": None,
+                        "last_run": {
+                            **summary,
+                            "finished_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                    }
+                    db.commit()
+                    return
 
                 # 把这次跑的结果记进 task.config，前端能看到"跑完到底做了几件事"
                 task.config = {
                     **(task.config or {}),
+                    "progress": None,
                     "last_run": {
                         **summary,
                         "finished_at": datetime.now(timezone.utc).isoformat(),

@@ -227,7 +227,7 @@ IDLE → VERIFICATION → GREETING → PROBING → EXTRACTION → EXIT
 
 群组：`POST /groups/search`（支持 AI 关键词扩展）、`POST /groups/join`、`POST /groups/add-by-link`
 
-任务/对话/情报：`POST|GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/start`、`DELETE /tasks/{id}`（按依赖顺序删消息 → 会话 → 情报 → 任务；外键没有 ondelete cascade）、`GET /conversations`、`GET /conversations/{id}`、`POST /conversations/{id}/end`（前端「拉黑」按钮走这里：只置 `ended_at` + 状态为 exit + WebSocket 通知，**并不写入 blocklist**）、`GET /intelligence`
+任务/对话/情报：`POST|GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/start`、`POST /tasks/{id}/cancel`（运行中则立 `cancel_requested` 标记，流水线在下个检查点停；未运行直接置 FAILED + `last_run.error=用户取消`）、`POST /tasks/{id}/pause`（仅未运行的任务；运行中的只能取消）、`DELETE /tasks/{id}`（按依赖顺序删消息 → 会话 → 情报 → 任务；外键没有 ondelete cascade）、`GET /conversations`、`GET /conversations/{id}`、`POST /conversations/{id}/end`（前端「拉黑」按钮走这里：只置 `ended_at` + 状态为 exit + WebSocket 通知，**并不写入 blocklist**）、`GET /intelligence`
 
 > `tasks/{id}/start` 只拦「正在运行」的任务（`PENDING` 是新建任务的默认状态、界面上叫"等待中"，不代表"已在运行"）；派发前先 ping Celery worker，**没有 worker 就在 API 进程内用 `run_task.apply()` 直接执行**并在响应里回 `mode: "inline"`，否则任务只会永远挂在"运行中"（本机通常只开 uvicorn + next，没有 worker）。
 
@@ -335,8 +335,7 @@ mypy .
    以及 `login_printer.py` / `persistent_chat_demo.py` / `live_chat_demo.py` / `real_demo.py` / `demo_test.py`）。
    此前目录不存在时 Telethon 会在构造瞬间报 `sqlite3.OperationalError: unable to open database file`。
 
-3. **回复逻辑有三份实现**
-   `engine.ConversationEngine`（被 `tasks.py` 用）、`persistent_chat_demo.py` 的 `generate_response()`、以及 `routes.py` 里一段内联 LLM 调用（约 473-560 行）。三者行为并不完全一致，改对话流程时要一起看。
+3. ~~**回复逻辑有三份实现**~~ ✅ **已收敛**：`routes.py` 那段其实是群搜索的 AI 扩词（不是回复）；真正的分歧是守护进程虽然调了 `ConversationEngine`，却把 `state` 写死成 `PROBING`、`history=[]`，等于状态机没跑。现在统一到 `app/services/conversation/reply_service.generate_reply()`：加载会话状态 + 最近 20 条消息历史 → 引擎走完状态机 → 把新状态/轮次/上下文摘要落库。守护进程只负责收消息、调它、发消息；`process_incoming_message()`（死代码）仍保留但不再被当成另一条回复链路。改对话流程看 `engine.py` 一处即可。
 
 4. **`classify_category()` 可能返回 `"unknown"`**，而 `IntelligenceRecord.category` 是枚举 → 落库会抛错，错误被 `_process_intelligence_sync` 的 except 吞掉，只留一条日志。
 
@@ -371,6 +370,8 @@ mypy .
 17. **情报报告为什么一直是空的** ✅ **已接上**：`intelligence_records` 以前只由 `workers.process_incoming_message()` 写，而那个 Celery 任务**全仓库没有任何调用点**（守护进程有自己的回复逻辑，也不写情报），所以情报页永远是 0 条。现在 `persist_message()` 在保存**入站**消息后会调用 `_extract_intelligence()`：`extract_entities` + `classify_category` + `calculate_activity_score`，按 `dedup_fingerprint` 去重更新（同一目标不重复建行）。注意：**没命中四类业务信号词（私家侦探/换汇/自由职业/数据贩卖）的消息不会建记录**，这是刻意的——情报只针对特定业务线索，不是聊天记录转储。另外 `persist_message()` 为守护进程消息自动创建的容器任务（`Auto-<平台>`）已在 `GET /tasks` 里过滤掉，不会出现在任务列表；它同时会建一个 `Account` 行（`uuid5("account-<会话名>")`），`run_task` 的账号解析会复用这一行。
 
 18. **任务用哪个账号：显式选，不要猜**：任务创建表单新增账号下拉（按所选平台从 `/accounts` 过滤），选中的值写进 `task.config["account"]`，`run_task` 用 `_telegram_session_candidates(account, preferred_name)` **优先用它**，没选才自动挑（逐个试鉴权，跳过空会话）。同时三平台的行为对齐：**只有 Telegram 有外呼流水线**，所以 Facebook/Zalo 任务在界面上标注"尚未接入、无法启动"，后端 `POST /tasks/{id}/start` 也直接返回 400 说明原因（不再静默置 PAUSED）。会话名也不再"手输随便填"：前端在填手机号时自动生成 `tg<手机号数字>`（可改），前后端共用同一套规则 `app/core/session_paths.is_valid_session_name()`（1-48 位小写字母/数字/下划线/短横线，且不能以符号开头）——既统一体验，也挡住了 `../evil` 这类会写到 `sessions/` 目录之外的路径穿越。
+
+19. **任务运行中的可观测性**：`run_task` 在每个检查点把进度写进 `task.config["progress"]`（`stage` / `keyword` / `group` / `target` / `members`），任务页在"运行中"时实时显示；跑完清空 `progress`、写 `last_run` 摘要。取消是异步的：`POST /tasks/{id}/cancel` 只立 `cancel_requested`，流水线在每个检查点读库、发现后抛 `TaskCancelledError`（**不重试**），把任务置 FAILED 并记 `error=用户取消`。暂停仅对未运行任务有效（置 PAUSED，再点"继续"即恢复）。
 
 ---
 

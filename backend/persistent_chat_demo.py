@@ -31,8 +31,6 @@ from app.core.config import settings
 from app.core.processes import pid_alive
 from app.core.proxy import telegram_proxy
 from app.core.session_paths import ensure_session_dir
-from app.services.conversation.engine import ConversationEngine, ConvState
-from app.services.conversation.verification import verification_manager
 
 
 def _resolve_session_name() -> str:
@@ -160,7 +158,6 @@ class PersistentChatBot:
 
     def __init__(self):
         self.client = None
-        self.engine = ConversationEngine()
         self.persona_config = PERSONA_CONFIG
         self.category = CATEGORY
         self.running = True
@@ -312,8 +309,8 @@ class PersistentChatBot:
                     logger.info(f"🚫 用户 {user_id} 已被拉黑,忽略消息")
                     return
 
-                # 生成回复
-                response, new_state = await self.generate_response(message_text, user_id, CATEGORY)
+                # 生成回复（统一走 reply_service 的状态机，不再各自维护一份）
+                response = await self.generate_response(message_text, user_id, user_name)
 
                 # 模拟打字延迟（缩短）
                 typing_delay = min(len(response) * 0.02, 1.0)
@@ -342,87 +339,29 @@ class PersistentChatBot:
             except Exception as e:
                 logger.error(f"❌ 处理消息失败: {e}", exc_info=True)
 
-    async def generate_response(self, message: str, target_user_id: str, category: str):
-        """生成AI回复"""
+    async def generate_response(self, message: str, target_user_id: str, target_name: str) -> str:
+        """统一走 reply_service：加载会话状态 + 最近历史 → 状态机 → 落库。"""
+        import uuid as uuid_mod
+
+        from app.services.conversation.reply_service import generate_reply
+
         try:
-            # 检查验证状态
-            if not verification_manager.is_verified(target_user_id):
-                # Try to verify the user's answer first
-                if verification_manager.check_answer(target_user_id, message):
-                    logger.info(f"✅ 用户 {target_user_id} 通过验证!")
-                    # Fall through to AI engine below
-                else:
-                    # Not verified yet — send or resend challenge
-                    challenge_msg = verification_manager.get_challenge_message(target_user_id)
-                    return challenge_msg or "请回答: 10 + 5 = ?", ConvState.VERIFICATION
-
-            # Load context summary from DB
-            context_summary = None
-            try:
-                from sqlalchemy import select as sa_select
-
-                from app.core.database import async_session_factory
-                from app.models.models import Conversation
-
-                async with async_session_factory() as session:
-                    result = await session.execute(
-                        sa_select(Conversation).where(
-                            Conversation.target_user_id == target_user_id,
-                            Conversation.ended_at.is_(None),
-                        )
-                    )
-                    conv = result.scalar_one_or_none()
-                    if conv:
-                        context_summary = conv.context_summary
-            except Exception as e:
-                logger.debug("Could not load context_summary: %s", e)
-
-            # 调用对话引擎
-            response, state = await self.engine.generate_response(
-                incoming_message=message,
-                persona_config=self.persona_config,
-                state=ConvState.PROBING,
-                category=self.category,
-                history=[],
-                target_user_id=target_user_id,
-                context_summary=context_summary,
+            account_uuid = uuid_mod.uuid5(
+                uuid_mod.NAMESPACE_DNS, f"account-{SESSION_NAME.split('/')[-1]}"
             )
-
-            # Update context summary in background (don't block reply)
-            async def _update_summary():
-                try:
-                    updated_summary = await self.engine.update_context_summary(
-                        existing_summary=context_summary,
-                        incoming_message=message,
-                        reply=response,
-                        state=state,
-                    )
-                    from sqlalchemy import select as sa_select
-
-                    from app.core.database import async_session_factory
-                    from app.models.models import Conversation
-
-                    async with async_session_factory() as session:
-                        result = await session.execute(
-                            sa_select(Conversation).where(
-                                Conversation.target_user_id == target_user_id,
-                                Conversation.ended_at.is_(None),
-                            )
-                        )
-                        conv = result.scalar_one_or_none()
-                        if conv:
-                            conv.context_summary = updated_summary
-                            await session.commit()
-                except Exception as e:
-                    logger.debug("Could not save context_summary: %s", e)
-
-            asyncio.create_task(_update_summary())
-
-            return response, state
-
+            reply, _state = await generate_reply(
+                account_id=account_uuid,
+                account_name=SESSION_NAME.split("/")[-1],
+                target_user_id=target_user_id,
+                target_display_name=target_name,
+                incoming_message=message,
+                category=self.category,
+                persona_config=self.persona_config,
+            )
+            return reply
         except Exception as e:
-            logger.error(f"❌ 生成回复失败: {e}")
-            return "Xin lỗi, tôi đang bận. Hãy thử lại sau nhé! 😊", ConvState.IDLE
+            logger.error(f"❌ 生成回复失败: {e}", exc_info=True)
+            return "Xin lỗi, tôi đang bận. Hãy thử lại sau nhé! 😊"
 
     async def heartbeat(self):
         """心跳保活 - 防止超时掉线"""
