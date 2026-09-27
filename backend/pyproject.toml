@@ -6,7 +6,11 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
-    "sqlalchemy[asyncio]>=2.0.36",
+    # 上限卡在 <2.1：SQLAlchemy 2.1 把 postgresql:// 的默认 DBAPI 从 psycopg2
+    # 换成了 psycopg(v3)，而本项目同步引擎用的是 postgresql://，在 2.1 上会于
+    # create_engine() 处 import psycopg 失败（CI 全新安装就踩到了这个）。
+    # 将来要升 2.1：先加依赖 "psycopg[binary]>=3.2"，再在本机跑通真机验证。
+    "sqlalchemy[asyncio]>=2.0.36,<2.1",
     "alembic>=1.14.0",
     "asyncpg>=0.30.0",
     "psycopg2-binary>=2.9.10",
