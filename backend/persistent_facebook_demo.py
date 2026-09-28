@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from app.core.config import settings
 from app.services.conversation.engine import ConversationEngine, ConvState
 from app.services.conversation.verification import verification_manager
 from app.services.platform.base import AccountCredentials, MessageContent, PlatformName
@@ -51,7 +52,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 PID_FILE = Path(__file__).parent / "facebook_demo.pid"
-WS_URL = "ws://localhost:8000/ws"
+# WS 地址跟着后端实际端口走（APP_PORT → settings.ws_url），不再写死 8000
+WS_URL = settings.ws_url
 
 
 class WSBridge:

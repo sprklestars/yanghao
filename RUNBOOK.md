@@ -62,15 +62,28 @@ docker compose ps
 
 ### 窗口 2 · 后端 API（这个窗口要一直开着）
 
+**推荐用启动脚本**（端口可配置 + 被占用/被系统预留时自动换端口 + 自动同步前端配置）：
+
 ```powershell
 cd C:\Users\86178\.codex\worktrees\ac44\yanghao-1\backend
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+.\.venv\Scripts\python.exe start_api.py            # 加 --reload 则代码改动自动重载
 ```
 
-用 uv 也一样（它会自动用 `backend\.venv`）：
+输出示例（端口被系统预留时会看到第一行）：
+
+```
+[提示] 端口 8000 绑不上（被占用或被 Windows 预留），已自动改用 8600
+[启动] 后端地址：http://localhost:8600  （API 文档 /docs，健康检查 /health）
+[配置] 已同步前端配置：...\frontend\.env.local（如果 next dev 正在跑，请重启它生效）
+```
+
+想固定端口就在 `backend\.env` 里设 `APP_PORT`（默认 8000）。
+
+也可以手打原始命令（端口固定、不会自动避让）：
 
 ```powershell
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+# 用 uv 也一样：uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 ### 窗口 3 · 前端
@@ -172,6 +185,7 @@ npm run build             # 前端生产构建 + 类型检查
 | 控制台报「无法连接后端服务」 | 后端没起，或用 `127.0.0.1:3000` 打开被 CORS 拦 | 起后端；地址换回 `localhost:3000` |
 | `docker` 命令报连不上 docker API | Docker Desktop 没启动 | 启动 `E:\tool\Docker Desktop.exe`，等图标就绪 |
 | 启动后端报端口占用 | 已有一个实例在跑 | 用上面的端口查询命令确认，不用起第二个 |
+| 启动后端报 `[WinError 10013] 以一种访问权限不允许的方式做了一个访问套接字的尝试` | **不是端口被占用，而是 Windows 把这段端口预留了**（Hyper-V / WSL2 / Docker Desktop 的动态预留；本机实测 7681-8580 全在预留段里，8000 正好中招） | 用 `python start_api.py` 启动，它会自动换到可用端口并同步前端配置；想保住 8000 就用**管理员** PowerShell 执行 `net stop winnat`，启动后端后再 `net start winnat`。查预留段：`netsh interface ipv4 show excludedportrange protocol=tcp` |
 | 脚本报 `UnicodeEncodeError: 'gbk' codec` | 本机控制台默认 GBK，脚本里有 emoji | 命令加 `-X utf8`，例如 `python -X utf8 demo_simple.py` |
 | `alembic` 报找不到 `psycopg2` | 同步驱动缺失 | `uv pip install psycopg2-binary`（pyproject 里已声明，重装即可） |
 | 接口 500 且堆栈里有 `ArgumentError: Could not parse SQLAlchemy URL` | `backend\.env` 缺失或数据库地址为空 | 确认 `backend\.env` 存在且 `DATABASE_URL` / `DATABASE_URL_SYNC` 已填 |

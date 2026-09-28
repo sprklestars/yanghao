@@ -66,10 +66,9 @@ logger = logging.getLogger(__name__)
 # PID文件
 PID_FILE = Path(__file__).parent / "chat_demo.pid"
 
-WS_URL = (
-    "ws://localhost:8000/ws"
-    + (f"?token={settings.api_token}" if settings.api_token else "")
-)
+# WS 地址跟着后端实际端口走（settings.ws_url 由 APP_PORT 决定，见 app/core/config.py），
+# 不再写死 8000 —— 端口被 Windows 预留而换过时，守护进程也能连上正确的地址。
+WS_URL = settings.ws_url
 
 
 class WSBridge:

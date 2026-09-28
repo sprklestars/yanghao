@@ -1995,6 +1995,13 @@ async def start_service(
             raise HTTPException(status_code=400, detail=f"会话 {chosen} 不存在，请先完成登录")
         env["TG_SESSION_NAME"] = chosen
 
+    # 把后端实际监听的端口传给守护进程：端口可能不是 8000（被系统预留时启动脚本会换），
+    # 守护进程靠它拼 WebSocket 地址，否则会一直连错端口。
+    from app.core.config import settings as _settings
+
+    env.setdefault("APP_PORT", str(_settings.app_port))
+    env.setdefault("APP_HOST", _settings.app_host)
+
     # Windows 没有 setsid；用 DETACHED_PROCESS 让守护进程不随 API 进程退出。
     creationflags = 0
     if os.name == "nt":

@@ -52,8 +52,24 @@ class Settings(BaseSettings):
     # App
     app_env: str = "development"
     log_level: str = "INFO"
+    # 后端监听的地址与端口。端口可改是因为 Windows 上 Hyper-V / WSL2 / Docker Desktop
+    # 会动态预留一大片端口（实测本机 7681-8580 全被预留，8000 正好落在里面），
+    # 被预留的端口任何程序都绑不上（WinError 10013），换一个即可。
+    app_host: str = "0.0.0.0"
+    app_port: int = 8000
 
     model_config = {"env_file": _ENV_FILE, "env_file_encoding": "utf-8"}
+
+    @property
+    def api_base_url(self) -> str:
+        """前端/脚本访问 REST 用的地址（跟着 app_port 走）。"""
+        return f"http://localhost:{self.app_port}/api/v1"
+
+    @property
+    def ws_url(self) -> str:
+        """常驻守护进程连后端用的 WebSocket 地址（带 API_TOKEN 时自动附加）。"""
+        url = f"ws://localhost:{self.app_port}/ws"
+        return f"{url}?token={self.api_token}" if self.api_token else url
 
     @field_validator("tg_api_id", mode="before")
     @classmethod
