@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { fetchAPI, type Conversation, DEMO_CONVERSATIONS, wsClient } from '@/lib/api';
+import { downloadExport, fetchAPI, type Conversation, wsClient } from '@/lib/api';
 
 interface LiveMessage {
   id: string;
@@ -17,8 +17,13 @@ export default function ConversationsPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<Conversation | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [demoMode, setDemoMode] = useState(false);
+  // 只有真的连不上后端才设置；没有对话记录是正常状态
+  const [backendError, setBackendError] = useState('');
   const [blockedUsers, setBlockedUsers] = useState<Set<string>>(new Set());
+  const [blockedList, setBlockedList] = useState<
+    { user_id: string; reason?: string; blocked_at?: string }[]
+  >([]);
+  const [showBlocked, setShowBlocked] = useState(false);
   const [liveMessages, setLiveMessages] = useState<LiveMessage[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -30,21 +35,48 @@ export default function ConversationsPage() {
   async function loadConversations() {
     try {
       const data = await fetchAPI<Conversation[]>('/conversations');
-      if (data && data.length > 0) {
-        setConversations(data.filter((c) => !blockedUsers.has(c.target_user_id)));
-        setDemoMode(false);
-      } else {
-        setConversations(DEMO_CONVERSATIONS.filter((c) => !blockedUsers.has(c.target_user_id)));
-        setDemoMode(true);
-      }
-    } catch {
-      setConversations(DEMO_CONVERSATIONS.filter((c) => !blockedUsers.has(c.target_user_id)));
-      setDemoMode(true);
+      setConversations(data || []);
+      setBackendError('');
+    } catch (e: any) {
+      setConversations([]);
+      setBackendError(e?.message || '后端不可达');
     }
     setLoaded(true);
   }
 
+  async function loadBlocklist() {
+    try {
+      const data = await fetchAPI<{
+        items: { user_id: string; reason?: string; blocked_at?: string }[];
+      }>('/blocklist');
+      const items = data?.items || [];
+      setBlockedList(items);
+      setBlockedUsers(new Set(items.map((item) => item.user_id)));
+    } catch {
+      /* 后端不可达时保持现状 */
+    }
+  }
+
+  async function unblock(userId: string) {
+    try {
+      await fetchAPI(`/blocklist/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+      await loadBlocklist();
+      await loadConversations();
+    } catch (e: any) {
+      alert(`取消拉黑失败：${e?.message || '请检查后端服务'}`);
+    }
+  }
+
+  async function exportConversations(fmt: string) {
+    try {
+      await downloadExport(`/export/conversations?format=${fmt}`);
+    } catch (e: any) {
+      alert(`导出失败：${e?.message || '请检查后端服务'}`);
+    }
+  }
+
   useEffect(() => {
+    loadBlocklist();
     loadConversations();
   }, []);
 
@@ -82,19 +114,19 @@ export default function ConversationsPage() {
   async function blockUser(conversationId: string, targetUserId: string) {
     try {
       await fetchAPI(`/conversations/${conversationId}/end`, { method: 'POST' });
-    } catch {
-      // ignore
+    } catch (e: any) {
+      alert(`拉黑失败：${e?.message || '请检查后端服务'}`);
+      return;
     }
-    setBlockedUsers((prev) => new Set(prev).add(targetUserId));
-    setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+    await loadBlocklist();
     if (selected?.id === conversationId) setSelected(null);
   }
 
   return (
     <div className="flex flex-col h-[calc(100vh-3rem)]">
-      {demoMode && (
-        <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2 text-sm text-yellow-800 mb-2 rounded">
-          💡 <strong>演示模式:</strong> 数据库中暂无对话记录，显示模拟数据。启动持久化监听服务后将显示真实对话。
+      {backendError && (
+        <div className="bg-rose-50 border border-rose-200 px-4 py-2 text-sm text-rose-800 mb-2 rounded">
+          ⚠️ <strong>后端不可达:</strong> {backendError}
         </div>
       )}
 
@@ -105,13 +137,32 @@ export default function ConversationsPage() {
           <div className="flex-1 bg-white rounded shadow overflow-hidden flex flex-col min-h-0">
             <div className="p-3 border-b flex items-center justify-between">
               <h3 className="font-semibold text-sm">历史对话</h3>
-              <button onClick={loadConversations} className="text-xs text-blue-600 hover:underline">
-                {loaded ? '刷新' : '加载'}
-              </button>
+              <div className="flex items-center gap-2">
+                <select
+                  className="border px-2 py-1 rounded text-xs"
+                  defaultValue="csv"
+                  onChange={(e) => {
+                    exportConversations(e.target.value);
+                    e.target.value = '';
+                  }}
+                >
+                  <option value="" disabled>
+                    导出…
+                  </option>
+                  <option value="csv">CSV</option>
+                  <option value="json">JSON</option>
+                  <option value="xlsx">Excel</option>
+                </select>
+                <button onClick={loadConversations} className="text-xs text-blue-600 hover:underline">
+                  {loaded ? '刷新' : '加载'}
+                </button>
+              </div>
             </div>
             <div className="flex-1 overflow-y-auto">
               {!loaded && <p className="p-3 text-gray-500 text-sm">点击加载获取对话列表</p>}
-              {conversations.map((c) => (
+              {conversations
+                .filter((c) => !blockedUsers.has(c.target_user_id))
+                .map((c) => (
                 <div
                   key={c.id}
                   onClick={() => setSelected(c)}
@@ -130,11 +181,45 @@ export default function ConversationsPage() {
                     拉黑
                   </button>
                 </div>
-              ))}
-              {loaded && conversations.length === 0 && (
+                ))}
+              {loaded && conversations.every((c) => blockedUsers.has(c.target_user_id)) && (
                 <p className="p-3 text-gray-400 text-sm text-center">暂无历史对话</p>
               )}
             </div>
+          </div>
+
+          {/* 黑名单：和守护进程共享同一个文件，所以这里取消拉黑会立刻生效 */}
+          <div className="bg-white rounded shadow overflow-hidden">
+            <button
+              onClick={() => setShowBlocked((v) => !v)}
+              className="w-full p-3 text-left text-sm font-semibold flex items-center justify-between"
+            >
+              <span>🚫 黑名单（{blockedList.length}）</span>
+              <span className="text-slate-400 text-xs">{showBlocked ? '收起' : '展开'}</span>
+            </button>
+            {showBlocked && (
+              <div className="max-h-40 overflow-y-auto border-t">
+                {blockedList.length === 0 && (
+                  <p className="p-3 text-xs text-slate-400">暂无拉黑用户</p>
+                )}
+                {blockedList.map((b) => (
+                  <div
+                    key={b.user_id}
+                    className="p-2 border-b text-xs flex items-center justify-between gap-2"
+                  >
+                    <span className="truncate" title={b.reason || b.user_id}>
+                      {b.user_id}
+                    </span>
+                    <button
+                      onClick={() => unblock(b.user_id)}
+                      className="text-blue-600 hover:underline shrink-0"
+                    >
+                      取消拉黑
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { type Account, type ReplyPolicy, type PersonaPreset, DEMO_ACCOUNTS, accountAPI, serviceAPI, type ServiceStatus, wsClient, fetchAPI } from '@/lib/api';
+import { type Account, type ReplyPolicy, type PersonaPreset, accountAPI, serviceAPI, type ServiceStatus, wsClient, fetchAPI } from '@/lib/api';
 
 const PLATFORM_CONFIG: Record<string, { icon: string; color: string; label: string }> = {
   telegram: { icon: '✈️', color: 'from-sky-500 to-blue-600', label: 'Telegram' },
@@ -21,17 +21,30 @@ interface LiveMessage {
 }
 
 export default function AccountsPage() {
+  // 会话名会拼成 sessions/<name>.session，字符集必须和后端 _require_valid_session_name 一致
+  const SESSION_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
+  const deriveSessionName = (phone: string) => {
+    const digits = phone.replace(/\D/g, '');
+    return digits ? `tg${digits}` : '';
+  };
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [services, setServices] = useState<ServiceStatus[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [demoMode, setDemoMode] = useState(false);
+  // 后端不可达时才设置；账号列表为空是正常状态，不再当成"演示模式"
+  const [backendError, setBackendError] = useState('');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  // 启动/停止平台服务失败时的提示（以前只 console.error，界面上看着像"没反应"）
+  const [serviceError, setServiceError] = useState('');
+  // 账号级操作的失败提示（例如会话文件被占用导致删不掉）
+  const [pageError, setPageError] = useState('');
   const [logView, setLogView] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [chatView, setChatView] = useState<string | null>(null);
   const [liveMessages, setLiveMessages] = useState<LiveMessage[]>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const personaBtnRef = useRef<HTMLButtonElement>(null);
+  // 人设下拉的定位：按"被点击的那个按钮"算，不能用共享 ref
+  // （以前所有账号卡片共用一个 ref，点 Telegram 的按钮弹出来的位置是最后一个卡片的）
+  const [personaMenuStyle, setPersonaMenuStyle] = useState<React.CSSProperties>({});
 
   // Login modal state
   const [showLoginModal, setShowLoginModal] = useState(false);
@@ -44,6 +57,8 @@ export default function AccountsPage() {
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginSuccess, setLoginSuccess] = useState('');
+  const [fbCookieText, setFbCookieText] = useState('');
+  const [fbCookieLoading, setFbCookieLoading] = useState(false);
   const [testConnLoading, setTestConnLoading] = useState(false);
   const [testConnResult, setTestConnResult] = useState<{ ok: boolean; message: string } | null>(null);
 
@@ -55,6 +70,12 @@ export default function AccountsPage() {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [personaPresets, setPersonaPresets] = useState<PersonaPreset[]>([]);
   const [personaSelector, setPersonaSelector] = useState<string | null>(null);
+  const [showPersonaForm, setShowPersonaForm] = useState(false);
+  const [personaForm, setPersonaForm] = useState({
+    name: '', desc: '', tone: '', age: '', occupation: '', location: '', backstory: '',
+  });
+  const [personaFormError, setPersonaFormError] = useState('');
+  const [showStatusLegend, setShowStatusLegend] = useState(false);
 
   const loadData = async () => {
     try {
@@ -62,21 +83,17 @@ export default function AccountsPage() {
         accountAPI.list(),
         serviceAPI.status(),
       ]);
-      if (accData && accData.length > 0) {
-        setAccounts(accData);
-        setDemoMode(false);
-      } else {
-        setAccounts(DEMO_ACCOUNTS);
-        setDemoMode(true);
-      }
+      setAccounts(accData || []);
       setServices(svcData || []);
+      setBackendError('');
       try {
         const pData = await accountAPI.listPersonas();
         if (pData?.personas) setPersonaPresets(pData.personas);
       } catch { /* ignore */ }
-    } catch {
-      setAccounts(DEMO_ACCOUNTS);
-      setDemoMode(true);
+    } catch (e: any) {
+      setAccounts([]);
+      setServices([]);
+      setBackendError(e?.message || '后端不可达');
     }
     setLoaded(true);
   };
@@ -112,15 +129,29 @@ export default function AccountsPage() {
 
   const getServiceForPlatform = (platform: string) => services.find((s) => s.platform === platform);
 
-  const handleStart = async (platform: string) => {
+  const handleStart = async (platform: string, session?: string) => {
     setActionLoading(platform);
-    try { await serviceAPI.start(platform); await loadData(); } catch (e) { console.error('Start failed:', e); }
+    setServiceError('');
+    try {
+      await serviceAPI.start(platform, session);
+      await loadData();
+    } catch (e: any) {
+      console.error('Start failed:', e);
+      setServiceError(`启动 ${platform} 服务失败：${e?.message || e}`);
+    }
     setActionLoading(null);
   };
 
   const handleStop = async (platform: string) => {
     setActionLoading(platform);
-    try { await serviceAPI.stop(platform); await loadData(); } catch (e) { console.error('Stop failed:', e); }
+    setServiceError('');
+    try {
+      await serviceAPI.stop(platform);
+      await loadData();
+    } catch (e: any) {
+      console.error('Stop failed:', e);
+      setServiceError(`停止 ${platform} 服务失败：${e?.message || e}`);
+    }
     setActionLoading(null);
   };
 
@@ -137,16 +168,18 @@ export default function AccountsPage() {
 
   const getHealthBadge = (health: string) => {
     switch (health) {
-      case 'green': return { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500', label: '健康' };
-      case 'yellow': return { bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500', label: '警告' };
-      case 'red': return { bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', dot: 'bg-rose-500', label: '危险' };
-      case 'black': return { bg: 'bg-gray-900', text: 'text-white', border: 'border-gray-700', dot: 'bg-gray-900', label: '封禁' };
-      default: return { bg: 'bg-slate-50', text: 'text-slate-600', border: 'border-slate-200', dot: 'bg-slate-400', label: '未知' };
+      case 'green': return { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500', label: '健康', tip: '登录态有效，可以跑任务' };
+      case 'yellow': return { bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500', label: '注意', tip: '还能用，但需要留意（例如 cookie 快过期）' };
+      case 'red': return { bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200', dot: 'bg-rose-500', label: '失效', tip: '登录态已失效，需要重新登录' };
+      case 'black': return { bg: 'bg-gray-900', text: 'text-white', border: 'border-gray-700', dot: 'bg-gray-900', label: '需人工', tip: '被平台拦下（安全验证/封号等），必须人工处理后才能继续' };
+      default: return { bg: 'bg-slate-50', text: 'text-slate-600', border: 'border-slate-200', dot: 'bg-slate-400', label: '未知', tip: '还没检测过' };
     }
   };
 
-  const getDaysSince = (createdAt: string) => {
+  const getDaysSince = (createdAt?: string | number) => {
+    if (createdAt === undefined || createdAt === null) return 0;
     const ts = typeof createdAt === 'number' ? createdAt * 1000 : new Date(createdAt).getTime();
+    if (Number.isNaN(ts)) return 0;
     return Math.floor((Date.now() - ts) / (1000 * 60 * 60 * 24));
   };
 
@@ -186,9 +219,11 @@ export default function AccountsPage() {
     try {
       await accountAPI.delete(accountId);
       setDeleteConfirm(null);
+      setPageError('');
       loadData();
-    } catch (e) {
+    } catch (e: any) {
       console.error('Failed to delete account:', e);
+      setPageError(`删除账号 ${accountId} 失败：${e?.message || e}`);
     }
   };
 
@@ -226,6 +261,79 @@ export default function AccountsPage() {
     }
   };
 
+  const reloadPersonas = async () => {
+    try {
+      const data = await accountAPI.listPersonas();
+      if (data?.personas) setPersonaPresets(data.personas);
+    } catch (e) {
+      console.error('Failed to load personas:', e);
+    }
+  };
+
+  const closePersonaMenu = () => {
+    setPersonaSelector(null);
+    setShowPersonaForm(false);
+    setPersonaFormError('');
+  };
+
+  // 下拉定位：贴着"被点的那个按钮"，并且不超出窗口（下面放不下就往上弹）
+  const openPersonaMenu = (accountId: string, event: React.MouseEvent<HTMLButtonElement>) => {
+    if (personaSelector === accountId) {
+      closePersonaMenu();
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = 320;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    const spaceBelow = window.innerHeight - rect.bottom - 12;
+    const openUp = spaceBelow < 260 && rect.top > spaceBelow;
+    setPersonaMenuStyle(
+      openUp
+        ? { left, bottom: window.innerHeight - rect.top + 6, maxHeight: Math.max(200, rect.top - 12) }
+        : { left, top: rect.bottom + 6, maxHeight: Math.max(200, spaceBelow) },
+    );
+    setPersonaFormError('');
+    setPersonaSelector(accountId);
+  };
+
+  const handleCreatePersona = async () => {
+    if (!personaForm.name.trim()) {
+      setPersonaFormError('人设名不能为空');
+      return;
+    }
+    try {
+      const created = await accountAPI.createPersona({
+        name: personaForm.name.trim(),
+        desc: personaForm.desc.trim(),
+        tone: personaForm.tone.trim(),
+        age: personaForm.age ? Number(personaForm.age) : undefined,
+        occupation: personaForm.occupation.trim(),
+        location: personaForm.location.trim(),
+        backstory: personaForm.backstory.trim(),
+      });
+      await reloadPersonas();
+      // 建完直接给当前账号选中，省一次点击
+      if (personaSelector && created?.persona?.key) {
+        await accountAPI.setPersona(personaSelector, created.persona.key);
+        loadData();
+      }
+      setPersonaForm({ name: '', desc: '', tone: '', age: '', occupation: '', location: '', backstory: '' });
+      setShowPersonaForm(false);
+      closePersonaMenu();
+    } catch (e: any) {
+      setPersonaFormError(e?.message || '创建人设失败');
+    }
+  };
+
+  const handleDeletePersona = async (key: string) => {
+    try {
+      await accountAPI.deletePersona(key);
+      await reloadPersonas();
+    } catch (e: any) {
+      setPersonaFormError(e?.message || '删除人设失败');
+    }
+  };
+
   // Login handlers
   const openLoginModal = () => {
     setLoginStep('platform');
@@ -236,6 +344,7 @@ export default function AccountsPage() {
     setLoginSessionName('');
     setLoginError('');
     setLoginSuccess('');
+    setFbCookieText('');
     setTestConnResult(null);
     setShowLoginModal(true);
   };
@@ -254,11 +363,16 @@ export default function AccountsPage() {
   };
 
   const handleSendCode = async () => {
-    if (!loginPhone || !loginSessionName) { setLoginError('请输入Session名称和手机号码'); return; }
+    const sessionName = loginSessionName.trim();
+    if (!SESSION_NAME_RE.test(sessionName)) {
+      setLoginError('Session 名称只能用 1-48 位小写字母、数字、下划线或短横线，并以字母/数字开头');
+      return;
+    }
+    if (!loginPhone) { setLoginError('请输入手机号码'); return; }
     setLoginLoading(true);
     setLoginError('');
     try {
-      await accountAPI.telegramSendCode(loginPhone, loginSessionName);
+      await accountAPI.telegramSendCode(loginPhone, sessionName);
       setLoginStep('code');
     } catch (e: any) {
       const msg = e?.message || '';
@@ -318,11 +432,23 @@ export default function AccountsPage() {
     <div className="flex flex-col h-[calc(100vh-3rem)]">
       {/* Status banner */}
       <div className={`mb-6 px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 ${
-        demoMode ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+        backendError ? 'bg-rose-50 text-rose-800 border border-rose-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
       }`}>
-        <span>{demoMode ? '⚠️' : '✅'}</span>
-        {demoMode ? '演示模式 — 后端不可达，显示模拟数据' : '实时模式 — 已连接后端服务'}
+        <span>{backendError ? '⚠️' : '✅'}</span>
+        {backendError
+          ? `后端不可达 — 请确认 API 已在 8000 端口启动（${backendError}）`
+          : '已连接后端服务'}
       </div>
+      {serviceError && (
+        <div className="mb-6 px-4 py-2.5 rounded-lg text-sm font-medium bg-rose-50 text-rose-800 border border-rose-200 whitespace-pre-wrap">
+          ⚠️ {serviceError}
+        </div>
+      )}
+      {pageError && (
+        <div className="mb-6 px-4 py-2.5 rounded-lg text-sm font-medium bg-rose-50 text-rose-800 border border-rose-200 whitespace-pre-wrap">
+          ⚠️ {pageError}
+        </div>
+      )}
 
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
@@ -334,11 +460,33 @@ export default function AccountsPage() {
           <button onClick={loadData} className="px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 text-sm font-medium transition-colors shadow-sm">
             刷新
           </button>
+          <button
+            onClick={() => setShowStatusLegend((v) => !v)}
+            className="px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 text-sm font-medium transition-colors shadow-sm"
+          >
+            ⓘ 状态说明
+          </button>
           <button onClick={openLoginModal} className="px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 text-sm font-medium transition-colors shadow-sm">
             + 添加账号
           </button>
         </div>
       </div>
+
+      {showStatusLegend && (
+        <div className="mb-4 p-4 bg-white border border-slate-200 rounded-xl text-sm text-slate-600 space-y-2">
+          <div className="font-semibold text-slate-800">账号状态怎么看</div>
+          <div className="grid gap-1.5 sm:grid-cols-2">
+            <div>🟢 <b>健康</b>：登录态有效，可以跑任务</div>
+            <div>🟡 <b>注意</b>：还能用但需留意（例如 cookie 快过期）</div>
+            <div>🔴 <b>失效</b>：登录态过期/失效，需要重新登录</div>
+            <div>⚫ <b>需人工</b>：被平台拦下（安全验证、封号等），必须人工处理后才能继续</div>
+          </div>
+          <div className="text-xs text-slate-500 pt-1 border-t border-slate-100">
+            另外还有几个独立标记：<b>▶ 对话中 / ⏸ 已暂停</b>（暂停后不自动回复；目前只对 Telegram 常驻服务生效）、
+            <b>活跃 / 停用</b>（是否参与任务）、以及<b>养号阶段</b>（新号期 / 温号期 / 稳定期 / 成熟期，决定每日加群、私聊、发消息的限额）。
+          </div>
+        </div>
+      )}
 
       {!loaded ? (
         <div className="flex items-center justify-center py-20">
@@ -362,19 +510,31 @@ export default function AccountsPage() {
                     <span className="text-xl">{config.icon}</span>
                     <h3 className="font-semibold text-base">{config.label}</h3>
                     <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${isRunning ? 'bg-white/20 text-white' : 'bg-black/20 text-white/70'}`}>
-                      {isRunning ? '运行中' : '未运行'}
+                      {isRunning
+                        ? `运行中${svc?.session ? ` · @${svc.session}` : ''}`
+                        : '未运行'}
                     </span>
                     <span className="text-xs text-white/60">{platformAccounts.length} 个账号</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    {!isRunning ? (
-                      <button onClick={() => handleStart(platform)} disabled={isLoading}
-                        className="px-3 py-1.5 bg-white/20 backdrop-blur text-white rounded-lg text-xs font-medium hover:bg-white/30 disabled:opacity-50 transition-colors">
-                        {isLoading ? '启动中...' : '▶ 启动'}
+                    {platform === 'zalo' ? (
+                      <span className="px-3 py-1.5 text-xs text-white/70">暂不支持常驻服务</span>
+                    ) : !isRunning ? (
+                      <button
+                        onClick={() => handleStart(platform, platformAccounts[0]?.id)}
+                        disabled={isLoading}
+                        title="启动常驻在线服务：保持在线、监听私聊并自动回复（用于养号/实时对话）；它与任务管理里的外呼任务互斥"
+                        className="px-3 py-1.5 bg-white/20 backdrop-blur text-white rounded-lg text-xs font-medium hover:bg-white/30 disabled:opacity-50 transition-colors"
+                      >
+                        {isLoading ? '启动中...' : '▶ 启动在线服务'}
                       </button>
                     ) : (
-                      <button onClick={() => handleStop(platform)} disabled={isLoading}
-                        className="px-3 py-1.5 bg-black/20 backdrop-blur text-white rounded-lg text-xs font-medium hover:bg-black/30 disabled:opacity-50 transition-colors">
+                      <button
+                        onClick={() => handleStop(platform)}
+                        disabled={isLoading}
+                        title="停止常驻在线服务，之后该账号就可以用来跑外呼任务"
+                        className="px-3 py-1.5 bg-black/20 backdrop-blur text-white rounded-lg text-xs font-medium hover:bg-black/30 disabled:opacity-50 transition-colors"
+                      >
                         {isLoading ? '停止中...' : '⏹ 停止'}
                       </button>
                     )}
@@ -384,6 +544,13 @@ export default function AccountsPage() {
                     </button>
                   </div>
                 </div>
+                {platform !== 'zalo' && (
+                  <div className="px-5 py-2 text-xs text-slate-500 bg-slate-50 border-b border-slate-100">
+                    常驻在线服务 = 该账号登录后一直在线，监听私聊并按人设自动回复（养号 / 实时对话）。
+                    它与「任务管理」里的外呼任务<strong className="text-slate-700">互斥</strong>
+                    ：同一个账号同一时刻只能有一个 Telegram 客户端，启动任务前请先停掉服务。
+                  </div>
+                )}
 
                 {/* Log viewer */}
                 {logView === platform && (
@@ -430,7 +597,10 @@ export default function AccountsPage() {
                                   <span className="opacity-0 group-hover/name:opacity-100 text-xs text-slate-400 transition-opacity">✏️</span>
                                 </div>
                               )}
-                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${health.bg} ${health.text} ${health.border}`}>
+                              <span
+                                title={health.tip}
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${health.bg} ${health.text} ${health.border}`}
+                              >
                                 <span className={`w-1.5 h-1.5 rounded-full ${health.dot}`} />
                                 {health.label}
                               </span>
@@ -446,6 +616,16 @@ export default function AccountsPage() {
                               <span className={account.is_active ? 'text-emerald-600' : 'text-rose-500'}>{account.is_active ? '活跃' : '停用'}</span>
                               {account.proxy_url && <span className="text-slate-400 truncate max-w-[200px]">{account.proxy_url}</span>}
                             </div>
+                            {/* 为什么不是"健康"：直接把后端给的原因显示出来 */}
+                            {account.health_reason && account.health !== 'green' && (
+                              <div
+                                className="mt-1 text-xs text-rose-600 flex items-start gap-1"
+                                title={account.health_reason}
+                              >
+                                <span>⚠️</span>
+                                <span className="line-clamp-2">{account.health_reason}</span>
+                              </div>
+                            )}
                             {/* Reply policy toggles */}
                             <div className="flex items-center gap-1.5 mt-2 flex-wrap">
                               <span className="text-xs text-slate-400 mr-1">回复策略:</span>
@@ -486,8 +666,7 @@ export default function AccountsPage() {
                               </button>
                               <div className="relative inline-block">
                                 <button
-                                  ref={personaBtnRef}
-                                  onClick={() => setPersonaSelector(personaSelector === account.id ? null : account.id)}
+                                  onClick={(e) => openPersonaMenu(account.id, e)}
                                   className="px-3 py-1 rounded-full text-xs font-medium border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors"
                                 >
                                   🎭 {personaPresets.find((p) => p.key === account.persona)?.name || '选择人设'}
@@ -621,11 +800,22 @@ export default function AccountsPage() {
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Session 名称</label>
                   <input type="text" value={loginSessionName} onChange={(e) => setLoginSessionName(e.target.value)}
-                    placeholder="例如: user5" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-slate-900 focus:border-transparent outline-none text-sm transition-shadow" />
+                    placeholder="留空会按手机号自动生成，例如 tg8801934061959" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-slate-900 focus:border-transparent outline-none text-sm transition-shadow" />
+                  <p className="text-xs text-slate-400 mt-1">1-48 位小写字母、数字、下划线或短横线，并以字母/数字开头（会作为 sessions/&lt;名称&gt;.session 的文件名）</p>
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">手机号码 (含国际区号)</label>
-                  <input type="tel" value={loginPhone} onChange={(e) => setLoginPhone(e.target.value)}
+                  <input type="tel" value={loginPhone}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      // 没手动改过会话名时，按手机号自动生成，省得手输
+                      setLoginSessionName((current) =>
+                        current === '' || current === deriveSessionName(loginPhone)
+                          ? deriveSessionName(value)
+                          : current,
+                      );
+                      setLoginPhone(value);
+                    }}
                     placeholder="+8613800138000" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-slate-900 focus:border-transparent outline-none text-sm transition-shadow" />
                 </div>
                 <div className="flex gap-2 pt-1">
@@ -684,8 +874,13 @@ export default function AccountsPage() {
                     try {
                       const result = await accountAPI.facebookLoginComplete(name);
                       if (result.status === 'success') {
-                        setLoginSuccess(`Facebook 登录成功: ${name}`);
-                        setTimeout(() => { setShowLoginModal(false); loadData(); }, 1500);
+                        if (result.warning) {
+                          // 后端没看到登录态：别报"登录成功"，让用户自己确认
+                          setLoginSuccess(`已保存会话，但${result.warning}`);
+                        } else {
+                          setLoginSuccess(`Facebook 登录成功: ${name}`);
+                          setTimeout(() => { setShowLoginModal(false); loadData(); }, 1500);
+                        }
                       } else {
                         setLoginError(result.message || '登录完成失败');
                       }
@@ -695,6 +890,54 @@ export default function AccountsPage() {
                     {loginLoading ? '保存中...' : '✅ 完成登录'}
                   </button>
                 </div>
+
+                {/* cookie 直接导入：浏览器登录被 FB 风控卡住时的可靠路径 */}
+                <details className="border border-slate-200 rounded-lg overflow-hidden">
+                  <summary className="px-3 py-2.5 bg-slate-50 text-sm font-medium text-slate-700 cursor-pointer select-none">
+                    🔑 已有 Cookie？直接粘贴导入（推荐）
+                  </summary>
+                  <div className="p-3 space-y-3">
+                    <div className="text-xs text-slate-500 space-y-1">
+                      <p>支持三种格式，任选一种粘进下面的框：</p>
+                      <ul className="list-disc list-inside space-y-0.5">
+                        <li><code className="text-slate-700">c_user=100...; xs=12%3A...; datr=...</code>（DevTools → Network → 任意 facebook.com 请求 → Request Headers 里的 cookie 整行）</li>
+                        <li>JSON（浏览器扩展导出的 cookie 数组）</li>
+                        <li>cookies.txt（Netscape 格式，扩展「Get cookies.txt」导出）</li>
+                      </ul>
+                      <p className="text-amber-700">
+                        注意：<code>xs</code> 是 HttpOnly，控制台里 <code>document.cookie</code> 拿不到它，
+                        必须用扩展导出或从请求头复制，否则导入后会被判为未登录。
+                      </p>
+                    </div>
+                    <textarea
+                      value={fbCookieText}
+                      onChange={(e) => setFbCookieText(e.target.value)}
+                      rows={5}
+                      placeholder={'粘贴 cookie 到这里，例如：\nc_user=100012345678900; xs=12%3Aabcdef...; datr=xyz...'}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-slate-900 focus:border-transparent outline-none text-xs font-mono"
+                    />
+                    <button
+                      onClick={async () => {
+                        const name = loginSessionName || 'fb_default';
+                        if (!fbCookieText.trim()) { setLoginError('请先粘贴 cookie 内容'); return; }
+                        setFbCookieLoading(true); setLoginError(''); setLoginSuccess('');
+                        try {
+                          const result = await accountAPI.facebookImportCookies(name, fbCookieText);
+                          setLoginSuccess(result.message || `已导入 cookie: ${name}`);
+                          setFbCookieText('');
+                          setTimeout(() => { setShowLoginModal(false); loadData(); }, 1500);
+                        } catch (e: any) {
+                          setLoginError(e?.message || '导入 cookie 失败');
+                        }
+                        setFbCookieLoading(false);
+                      }}
+                      disabled={fbCookieLoading}
+                      className="w-full px-4 py-2.5 bg-slate-900 text-white rounded-lg hover:bg-slate-800 text-sm font-medium disabled:opacity-50 transition-colors"
+                    >
+                      {fbCookieLoading ? '导入并校验中...' : '导入并校验登录态'}
+                    </button>
+                  </div>
+                </details>
               </div>
             )}
 
@@ -776,38 +1019,116 @@ export default function AccountsPage() {
       {/* Persona selector dropdown (portal to avoid overflow clipping) */}
       {personaSelector && typeof document !== 'undefined' && createPortal(
         <>
-          <div className="fixed inset-0 z-40" onClick={() => setPersonaSelector(null)} />
+          <div className="fixed inset-0 z-40" onClick={closePersonaMenu} />
           <div
-            className="fixed z-50 w-64 bg-white border border-slate-200 rounded-lg shadow-xl overflow-hidden"
-            style={{
-              top: (() => {
-                const rect = personaBtnRef.current?.getBoundingClientRect();
-                return rect ? rect.bottom + 4 : 0;
-              })(),
-              left: (() => {
-                const rect = personaBtnRef.current?.getBoundingClientRect();
-                return rect ? rect.left : 0;
-              })(),
-            }}
+            className="fixed z-50 w-80 bg-white border border-slate-200 rounded-lg shadow-xl overflow-y-auto"
+            style={personaMenuStyle}
           >
             {personaPresets.map((p) => {
               const currentAccount = accounts.find((a) => a.id === personaSelector);
               const isActive = currentAccount?.persona === p.key;
               return (
-                <button
+                <div
                   key={p.key}
-                  onClick={() => handleSetPersona(personaSelector, p.key)}
-                  className={`w-full text-left px-3 py-2.5 hover:bg-slate-50 transition-colors border-b border-slate-50 last:border-0 ${isActive ? 'bg-indigo-50' : ''}`}
+                  className={`flex items-start gap-2 px-3 py-2.5 border-b border-slate-50 ${isActive ? 'bg-indigo-50' : ''}`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className={`text-sm font-medium ${isActive ? 'text-indigo-700' : 'text-slate-700'}`}>{p.name}</span>
-                    {isActive && <span className="text-indigo-500 text-xs">当前</span>}
-                  </div>
-                  <div className="text-xs text-slate-400 mt-0.5">{p.desc}</div>
-                  <div className="text-xs text-slate-400">风格: {p.tone}</div>
-                </button>
+                  <button
+                    onClick={() => handleSetPersona(personaSelector, p.key)}
+                    className="flex-1 text-left hover:opacity-80"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className={`text-sm font-medium ${isActive ? 'text-indigo-700' : 'text-slate-700'}`}>{p.name}</span>
+                      {isActive && <span className="text-indigo-500 text-xs">当前</span>}
+                    </div>
+                    {p.desc && <div className="text-xs text-slate-400 mt-0.5">{p.desc}</div>}
+                    {p.tone && <div className="text-xs text-slate-400">风格: {p.tone}</div>}
+                    {p.builtin === false && <div className="text-xs text-emerald-600">自定义</div>}
+                  </button>
+                  {p.builtin === false && (
+                    <button
+                      onClick={() => handleDeletePersona(p.key)}
+                      title="删除这个自定义人设"
+                      className="text-slate-300 hover:text-rose-500 px-1"
+                    >
+                      🗑
+                    </button>
+                  )}
+                </div>
               );
             })}
+
+            {showPersonaForm ? (
+              <div className="p-3 space-y-2 bg-slate-50">
+                <div className="text-xs font-semibold text-slate-600">新建人设</div>
+                <input
+                  value={personaForm.name}
+                  onChange={(e) => setPersonaForm({ ...personaForm, name: e.target.value })}
+                  placeholder="名字（必填），例如 Nguyen Van B"
+                  className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                />
+                <input
+                  value={personaForm.desc}
+                  onChange={(e) => setPersonaForm({ ...personaForm, desc: e.target.value })}
+                  placeholder="一句话描述，例如 二手车商，30岁，岘港"
+                  className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                />
+                <input
+                  value={personaForm.tone}
+                  onChange={(e) => setPersonaForm({ ...personaForm, tone: e.target.value })}
+                  placeholder="说话风格，例如 随和、爱开玩笑"
+                  className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    value={personaForm.age}
+                    onChange={(e) => setPersonaForm({ ...personaForm, age: e.target.value })}
+                    placeholder="年龄"
+                    className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                  />
+                  <input
+                    value={personaForm.location}
+                    onChange={(e) => setPersonaForm({ ...personaForm, location: e.target.value })}
+                    placeholder="城市"
+                    className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                  />
+                </div>
+                <input
+                  value={personaForm.occupation}
+                  onChange={(e) => setPersonaForm({ ...personaForm, occupation: e.target.value })}
+                  placeholder="职业"
+                  className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                />
+                <textarea
+                  value={personaForm.backstory}
+                  onChange={(e) => setPersonaForm({ ...personaForm, backstory: e.target.value })}
+                  placeholder="背景故事（会写进提示词，越具体越像真人）"
+                  rows={2}
+                  className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+                />
+                {personaFormError && <div className="text-xs text-rose-600">{personaFormError}</div>}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowPersonaForm(false)}
+                    className="flex-1 px-3 py-1.5 border border-slate-200 rounded text-xs text-slate-600 hover:bg-white"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={handleCreatePersona}
+                    className="flex-1 px-3 py-1.5 bg-indigo-600 text-white rounded text-xs font-medium hover:bg-indigo-700"
+                  >
+                    创建并选用
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowPersonaForm(true)}
+                className="w-full px-3 py-2.5 text-xs font-medium text-indigo-600 hover:bg-indigo-50 text-left"
+              >
+                ＋ 新建自定义人设
+              </button>
+            )}
           </div>
         </>,
         document.body,

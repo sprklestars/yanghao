@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { fetchAPI, accountAPI } from '@/lib/api';
+import { useEffect, useState } from 'react';
+import { fetchAPI, accountAPI, type Account } from '@/lib/api';
 
 interface GroupResult {
   group_id: string;
@@ -13,7 +13,10 @@ interface GroupResult {
 export default function GroupsPage() {
   const [query, setQuery] = useState('');
   const [useAI, setUseAI] = useState(true);
-  const [account, setAccount] = useState('printer');
+  // 账号列表来自后端（sessions/ 目录）。以前这里硬编码 printer/user3/user4，
+  // 那只是演示脚本里的会话名，选它会凭空在后端建出空的 .session 文件。
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [account, setAccount] = useState('');
   const [results, setResults] = useState<GroupResult[]>([]);
   const [keywordsUsed, setKeywordsUsed] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -21,6 +24,17 @@ export default function GroupsPage() {
   const [joinStatus, setJoinStatus] = useState<Record<string, string>>({});
   const [linkInput, setLinkInput] = useState('');
   const [linkLoading, setLinkLoading] = useState(false);
+
+  useEffect(() => {
+    accountAPI
+      .list()
+      .then((list) => {
+        const telegramAccounts = (list || []).filter((a) => a.platform === 'telegram');
+        setAccounts(telegramAccounts);
+        setAccount((current) => current || telegramAccounts[0]?.id || '');
+      })
+      .catch((e) => setError(e?.message || '读取账号列表失败'));
+  }, []);
 
   async function handleSearch() {
     if (!query.trim()) return;
@@ -95,10 +109,14 @@ export default function GroupsPage() {
             className="border px-3 py-2 rounded"
             value={account}
             onChange={(e) => setAccount(e.target.value)}
+            disabled={accounts.length === 0}
           >
-            <option value="printer">printer</option>
-            <option value="user3">user3</option>
-            <option value="user4">user4</option>
+            {accounts.length === 0 && <option value="">（没有可用账号）</option>}
+            {accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.display_name || a.username || a.id}
+              </option>
+            ))}
           </select>
           <button
             onClick={handleAddByLink}
@@ -143,10 +161,14 @@ export default function GroupsPage() {
             className="border px-2 py-1 rounded text-sm"
             value={account}
             onChange={(e) => setAccount(e.target.value)}
+            disabled={accounts.length === 0}
           >
-            <option value="printer">printer</option>
-            <option value="user3">user3</option>
-            <option value="user4">user4</option>
+            {accounts.length === 0 && <option value="">（没有可用账号）</option>}
+            {accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.display_name || a.username || a.id}
+              </option>
+            ))}
           </select>
         </div>
       </div>

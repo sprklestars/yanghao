@@ -1,8 +1,8 @@
 import asyncio
-from contextlib import redirect_stderr, redirect_stdout
 import io
-from types import SimpleNamespace
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import quick_login
@@ -32,15 +32,18 @@ class LoginAccountTests(unittest.IsolatedAsyncioTestCase):
         self.client = AsyncMock()
         self.client.is_user_authorized.return_value = False
         self.client.get_me.return_value = SimpleNamespace(id=1)
-        self.factory = self.enterContext(patch.object(quick_login, "TelegramClient", return_value=self.client))
+        self.factory = self.enterContext(
+            patch.object(quick_login, "TelegramClient", return_value=self.client)
+        )
         self.output = self.enterContext(redirect_stdout(io.StringIO()))
 
     async def test_login_uses_named_session_and_hidden_prompts(self):
         self.assertTrue(await quick_login.login_account("test2", self.settings))
         self.assertEqual(self.factory.call_args.args[0], str(quick_login.SESSION_DIR / "test2"))
         callbacks = self.client.start.call_args.kwargs
-        with patch("builtins.input", return_value=" +12345 "), patch.object(
-            quick_login, "getpass", side_effect=[" 12345 ", " secret "]
+        with (
+            patch("builtins.input", return_value=" +12345 "),
+            patch.object(quick_login, "getpass", side_effect=[" 12345 ", " secret "]),
         ):
             self.assertEqual(callbacks["phone"](), "+12345")
             self.assertEqual(callbacks["code_callback"](), "12345")
@@ -84,10 +87,14 @@ class LoginAccountTests(unittest.IsolatedAsyncioTestCase):
 class LoginBatchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.settings = SimpleNamespace(tg_api_id=12345, tg_api_hash="test-placeholder")
-        self.settings_factory = self.enterContext(patch.object(quick_login, "Settings", return_value=self.settings))
+        self.settings_factory = self.enterContext(
+            patch.object(quick_login, "Settings", return_value=self.settings)
+        )
         self.enterContext(patch.object(quick_login.sys.stdin, "isatty", return_value=True))
         self.directory = self.enterContext(patch.object(quick_login, "SESSION_DIR"))
-        self.login = self.enterContext(patch.object(quick_login, "login_account", new_callable=AsyncMock))
+        self.login = self.enterContext(
+            patch.object(quick_login, "login_account", new_callable=AsyncMock)
+        )
         self.output = self.enterContext(redirect_stdout(io.StringIO()))
 
     async def test_sequential_batch_uses_local_env(self):
@@ -101,11 +108,17 @@ class LoginBatchTests(unittest.IsolatedAsyncioTestCase):
 
         self.login.side_effect = login
         self.assertEqual(await quick_login.main(["test1", "test2", "test3"]), 0)
-        self.assertEqual(events, [
-            ("start", "test1"), ("end", "test1"),
-            ("start", "test2"), ("end", "test2"),
-            ("start", "test3"), ("end", "test3"),
-        ])
+        self.assertEqual(
+            events,
+            [
+                ("start", "test1"),
+                ("end", "test1"),
+                ("start", "test2"),
+                ("end", "test2"),
+                ("start", "test3"),
+                ("end", "test3"),
+            ],
+        )
         self.settings_factory.assert_called_once_with(_env_file=quick_login.BACKEND_DIR / ".env")
 
     async def test_account_failure_continues_and_exits_nonzero(self):
